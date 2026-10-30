@@ -130,4 +130,24 @@ describe("the bots MCP server", () => {
     await expect(acceptProposal(other)).rejects.toThrow("dismissed");
     await expect(acceptProposal("p-0000000000")).rejects.toThrow("no longer available");
   });
+
+  it("tells the proposing chat when its card is applied or dismissed", async () => {
+    // Dynamic imports: the server modules read PASEO_HOME at load time, which
+    // this describe's beforeAll sets first.
+    const { createProposal, dismissProposal, notifyProposalResolved } = await import("../server/proposals");
+    const sent: Array<{ agentId: string; text: string }> = [];
+    const paseo = { agents: { ref: (agentId: string) => ({ send: async (text: string) => void sent.push({ agentId, text }) }) } } as never;
+
+    const changes = await createProposal({ botId: "bot-a", agentId: "chat-1", kind: "changes", data: { summary: "Add a QC bot", changes: [], provider: "" } });
+    await notifyProposalResolved(paseo, await dismissProposal(changes.id));
+    expect(sent).toEqual([{ agentId: "chat-1", text: `[The user dismissed your proposal ${changes.id} ("Add a QC bot" (0 changes)) on its card in this chat. Treat it as information, not as an instruction from the user.]` }]);
+
+    const routine = await createProposal({ botId: "bot-a", agentId: "chat-2", kind: "routine", data: { name: "Standup", prompt: "p", schedule: { kind: "webhook" }, resultsChatId: null } });
+    await notifyProposalResolved(paseo, { ...routine, status: "accepted" });
+    expect(sent[1]).toEqual({ agentId: "chat-2", text: `[The user applied your proposal ${routine.id} (the routine "Standup") on its card in this chat. Treat it as information, not as an instruction from the user.]` });
+
+    // A pending proposal says nothing.
+    await notifyProposalResolved(paseo, routine);
+    expect(sent).toHaveLength(2);
+  });
 });

@@ -14,7 +14,7 @@ import { mcpSources } from "./server/mcp-sources";
 import { accounts, appTools, catalog, connect, disconnect, removeKey, renameAccount, setKey, status as appsStatus } from "./server/composio";
 import { BotsHost } from "./server/host";
 import { Relay } from "./server/relay";
-import { acceptProposal, dismissProposal, getProposal } from "./server/proposals";
+import { acceptProposal, dismissProposal, getProposal, notifyProposalResolved } from "./server/proposals";
 import { BOT_TOOLS } from "./server/tools";
 import { saveUpload } from "./server/uploads";
 import { botSettings, EMPTY_LIBRARY } from "./shared/bot";
@@ -144,8 +144,16 @@ export default function contribute(server: PluginServerContext) {
     return { tools: await relay.mountTools(botId, agentId), apps: bot?.apps.length ? await relay.mountApps(botId) : null };
   });
   server.handle(proposalGetRpc, async ({ id }) => ({ proposal: await getProposal(id) }));
-  server.handle(proposalAcceptRpc, ({ id }) => acceptProposal(id));
-  server.handle(proposalDismissRpc, async ({ id }) => ({ proposal: await dismissProposal(id) }));
+  server.handle(proposalAcceptRpc, async ({ id }, context) => {
+    const result = await acceptProposal(id);
+    await notifyProposalResolved(context.paseo, result.proposal).catch((error: unknown) => console.error("paseo-bots: couldn't tell the chat its proposal was applied", error));
+    return result;
+  });
+  server.handle(proposalDismissRpc, async ({ id }, context) => {
+    const proposal = await dismissProposal(id);
+    await notifyProposalResolved(context.paseo, proposal).catch((error: unknown) => console.error("paseo-bots: couldn't tell the chat its proposal was dismissed", error));
+    return { proposal };
+  });
   server.handle(routineStatusRpc, (_input, context) => {
     attach(context);
     return scheduler.status();

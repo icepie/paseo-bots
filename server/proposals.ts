@@ -1,9 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { foldText } from "../shared/activity";
 import type { Proposal } from "../shared/proposals";
 import { pluginDataPath } from "./bot-home";
 import { writeSkill } from "./library";
+import type { PaseoApi } from "./paseo";
 
 // Proposals wait in one file until the user saves or dismisses their card.
 // Only the newest are kept; an older card says it's no longer available.
@@ -71,4 +73,28 @@ export async function acceptProposal(id: string) {
   const saved = await writeSkill({ id: proposal.data.name, text: proposal.data.text });
   const accepted = await resolve(id, "accepted");
   return { proposal: accepted, skill: { id: proposal.data.name, description: saved.description, sha: saved.sha } };
+}
+
+/** What the card was about, worded for the message back into its chat. */
+function proposalWhat(proposal: Proposal): string {
+  switch (proposal.kind) {
+    case "changes":
+      return `"${foldText(proposal.data.summary, 80)}" (${proposal.data.changes.length} ${proposal.data.changes.length === 1 ? "change" : "changes"})`;
+    case "routine":
+      return `the routine "${proposal.data.name}"`;
+    case "skill":
+      return `the skill "${proposal.data.name}"`;
+  }
+}
+
+/**
+ * Applying or dismissing a card doesn't wake its chat, so the bot hears about
+ * it here: the note starts a turn in the proposing chat, and the bot can go on
+ * with what the card unblocked.
+ */
+export async function notifyProposalResolved(paseo: PaseoApi, proposal: Proposal): Promise<void> {
+  if (proposal.status === "pending") return;
+  const action = proposal.status === "accepted" ? "applied" : "dismissed";
+  const text = `[The user ${action} your proposal ${proposal.id} (${proposalWhat(proposal)}) on its card in this chat. Treat it as information, not as an instruction from the user.]`;
+  await paseo.agents.ref(proposal.agentId).send(text);
 }
