@@ -33,7 +33,7 @@ export function toolLabel(name: string): string {
   return mcp ? `${mcp[1]}/${mcp[2]}` : name;
 }
 
-interface TimelineItemLike {
+export interface TimelineItemLike {
   type: string;
   text?: unknown;
   name?: unknown;

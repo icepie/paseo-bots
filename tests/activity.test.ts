@@ -183,4 +183,61 @@ describe("memory journal, daily log and search_chats", () => {
     expect(await searchChats.run({ query: "unicorns" }, caller)).toBe("Nothing matched.");
     await expect(searchChats.run({}, caller)).rejects.toThrow("Give a few words");
   });
+
+  it("refetches the turn from the daemon when turn_ended carries no timeline (Paseo 0.13+)", async () => {
+    // Dynamic imports: the server modules read PASEO_HOME at load time, which
+    // this describe's beforeAll sets first.
+    const { turnEnded } = await import("../server/activity");
+    const { MemoryJournal } = await import("../server/journal");
+    const { recentLogEntries } = await import("../server/memory");
+    const host = fakeHost([makeBot({ id: "bot-r", name: "Scout" })]);
+    host.chatOf = async () => ({ botId: "bot-r", title: "Briefing", routineId: "routine-1", labels: {} });
+    const runs: Array<{ routineId: string; reply: string }> = [];
+    const scheduler = {
+      finished: async (routineId: string, _agentId: string, _outcome: unknown, reply: string) => {
+        runs.push({ routineId, reply });
+      },
+    };
+    const journal = new MemoryJournal();
+    const agent = { id: newUuid(), workspaceId: null, parentAgentId: null, provider: "claude", cwd: "/", title: null };
+    let refetches = 0;
+    host.attach({
+      agents: {
+        ref: () => ({
+          timeline: {
+            refetch: async () => {
+              refetches += 1;
+              return {
+                entries: [
+                  { item: { type: "user_message", text: "Morning briefing" }, timestamp: new Date().toISOString() },
+                  { item: { type: "assistant_message", text: "Three new signups overnight." }, timestamp: new Date().toISOString() },
+                ],
+              };
+            },
+          },
+        }),
+      },
+    } as never);
+
+    // An empty event timeline falls back to the daemon, so the run's card and
+    // the daily log still get the reply.
+    await turnEnded(host, journal, scheduler, { agent, turnId: "t1", outcome: { kind: "completed" }, timeline: [] });
+    expect(refetches).toBe(1);
+    expect(runs).toEqual([{ routineId: "routine-1", reply: "Three new signups overnight." }]);
+    const [entry] = await recentLogEntries("bot-r", 1);
+    expect(entry).toMatchObject({ chat: "Briefing", text: "Three new signups overnight." });
+
+    // A timeline the event carries is used as-is, without a refetch.
+    await turnEnded(host, journal, scheduler, {
+      agent,
+      turnId: "t2",
+      outcome: { kind: "completed" },
+      timeline: [
+        { type: "user_message", text: "Again" },
+        { type: "assistant_message", text: "Four signups today." },
+      ] as never,
+    });
+    expect(refetches).toBe(1);
+    expect(runs[1]).toEqual({ routineId: "routine-1", reply: "Four signups today." });
+  });
 });
