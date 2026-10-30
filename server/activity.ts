@@ -2,6 +2,7 @@ import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { foldText, lastTurn, logLine, type TimelineItemLike } from "../shared/activity";
 import { ASKED_FROM_LABEL } from "../shared/chat";
 import { watchedChats } from "./ask-notify";
+import { channelFailure, channelOf, type ChannelManager } from "./channels/manager";
 import type { BotsHost } from "./host";
 import type { MemoryJournal } from "./journal";
 import { appendDailyLog } from "./memory";
@@ -30,7 +31,13 @@ async function turnTimeline(host: BotsHost, agentId: string, fromEvent: PluginLi
   return page.entries.map((entry) => entry.item as TimelineItemLike);
 }
 
-export async function turnEnded(host: BotsHost, journal: MemoryJournal, scheduler: Pick<RoutineScheduler, "finished">, { agent, outcome, timeline }: PluginLifecycleEvents["agent.turn_ended"]): Promise<void> {
+export async function turnEnded(
+  host: BotsHost,
+  journal: MemoryJournal,
+  scheduler: Pick<RoutineScheduler, "finished">,
+  { agent, outcome, timeline }: PluginLifecycleEvents["agent.turn_ended"],
+  channels?: Pick<ChannelManager, "sendReply">,
+): Promise<void> {
   const chat = await host.chatOf(agent.id);
   if (!chat) return;
   const { botId } = chat;
@@ -46,6 +53,12 @@ export async function turnEnded(host: BotsHost, journal: MemoryJournal, schedule
   const askedFrom = chat.labels[ASKED_FROM_LABEL];
   if (askedFrom && !watchedChats.has(agent.id)) {
     await notifyAsker(host, askedFrom, agent.id, botId, outcome, reply).catch((error: unknown) => console.error("paseo-bots: couldn't tell the asking chat the answer is in", error));
+  }
+  // A channel-started chat (WeChat) gets the reply back over the channel.
+  const channel = channelOf(chat.labels);
+  if (channels && channel) {
+    const text = outcome.kind === "failed" ? channelFailure(outcome.error.message) : reply.trim();
+    if (text) await channels.sendReply(channel.accountId, channel.fromUserId, text).catch((error: unknown) => console.error("paseo-bots: couldn't send the chat's reply over its channel", error));
   }
 }
 

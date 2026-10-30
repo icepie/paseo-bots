@@ -364,6 +364,49 @@ export const proposalDismissRpc = defineRpc({
   output: z.object({ proposal: ProposalSchema }),
 });
 
+// ---------------------------------------------------------------- IM channels
+
+const ChannelAccountInfoSchema = z.object({
+  id: z.string(),
+  type: z.literal("wechat"),
+  ilinkBotId: z.string(),
+  ownerUserId: z.string().nullable(),
+  allowFrom: z.array(z.string()),
+  running: z.boolean(),
+});
+
+/** Channel accounts bound to a bot (tokens never leave the daemon). */
+export const channelListRpc = defineRpc({
+  name: "bots.channels.list",
+  input: z.object({ botId: BotId }),
+  output: z.object({ accounts: z.array(ChannelAccountInfoSchema) }),
+});
+
+/** Starts WeChat QR login: render qrUrl as an image, then poll channelWechatLoginPollRpc. */
+export const channelWechatLoginStartRpc = defineRpc({
+  name: "bots.channels.wechat-login-start",
+  input: z.object({ botId: BotId }),
+  output: z.object({ loginId: z.string(), qrUrl: z.string() }),
+});
+
+/** Login progress; qrUrl changes when an expired code is refreshed. */
+export const channelWechatLoginPollRpc = defineRpc({
+  name: "bots.channels.wechat-login-poll",
+  input: z.object({ loginId: z.string() }),
+  output: z.object({
+    status: z.enum(["wait", "scaned", "confirmed", "expired", "error"]),
+    qrUrl: z.string(),
+    account: ChannelAccountInfoSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const channelDisconnectRpc = defineRpc({
+  name: "bots.channels.disconnect",
+  input: z.object({ accountId: z.string() }),
+  output: z.object({ ok: z.boolean() }),
+});
+
 // ---------------------------------------------------------------- allowed commands
 
 const CommandRuleSchema = z.object({ id: z.string(), command: z.string(), cwd: z.string() });

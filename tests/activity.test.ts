@@ -270,4 +270,30 @@ describe("memory journal, daily log and search_chats", () => {
     await turnEnded(host, journal, scheduler, { agent, turnId: "t3", outcome: { kind: "failed", error: { message: "boom" } }, timeline });
     expect(sent[1]).toEqual({ id: "asking-chat", text: `[Worker's work for you in chat ${agent.id} failed: boom. Use check_chat with that id for details.]` });
   });
+
+  it("sends a channel chat's reply back over the channel, failures included", async () => {
+    // Dynamic imports: the server modules read PASEO_HOME at load time, which
+    // this describe's beforeAll sets first.
+    const { turnEnded } = await import("../server/activity");
+    const { MemoryJournal } = await import("../server/journal");
+    const { CHANNEL_ACCOUNT_LABEL, CHANNEL_FROM_LABEL } = await import("../shared/channels");
+    const host = fakeHost([makeBot({ id: "bot-w", name: "Worker" })]);
+    host.chatOf = async () => ({ botId: "bot-w", title: "WeChat: owner-1", routineId: null, labels: { [CHANNEL_ACCOUNT_LABEL]: "acc-1", [CHANNEL_FROM_LABEL]: "owner-1" } });
+    const sent: Array<{ accountId: string; fromUserId: string; text: string }> = [];
+    const channels = { sendReply: async (accountId: string, fromUserId: string, text: string) => void sent.push({ accountId, fromUserId, text }) };
+    const scheduler = { finished: async () => {} };
+    const journal = new MemoryJournal();
+    const agent = { id: newUuid(), workspaceId: null, parentAgentId: null, provider: "claude", cwd: "/", title: null };
+
+    await turnEnded(host, journal, scheduler, {
+      agent,
+      turnId: "t1",
+      outcome: { kind: "completed" },
+      timeline: [{ type: "user_message", text: "晚饭吃啥" }, { type: "assistant_message", text: "吃饺子。" }] as never,
+    }, channels);
+    expect(sent).toEqual([{ accountId: "acc-1", fromUserId: "owner-1", text: "吃饺子。" }]);
+
+    await turnEnded(host, journal, scheduler, { agent, turnId: "t2", outcome: { kind: "failed", error: { message: "boom" } }, timeline: [] as never }, channels);
+    expect(sent[1]).toEqual({ accountId: "acc-1", fromUserId: "owner-1", text: "[Something went wrong on my side: boom — try again in a moment.]" });
+  });
 });

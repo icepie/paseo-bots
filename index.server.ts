@@ -1,6 +1,7 @@
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { ensureBotHome, ensureBotsHome, migrateRenamedPluginData } from "./server/bot-home";
 import { turnEnded, turnStarted } from "./server/activity";
+import { ChannelManager } from "./server/channels/manager";
 import { CommandAllowlist } from "./server/commands";
 import { MemoryJournal } from "./server/journal";
 import { deleteLogDay, listLogDays, listMemory, readLogDay, readMemory } from "./server/memory";
@@ -20,6 +21,10 @@ import { saveUpload } from "./server/uploads";
 import { botSettings, EMPTY_LIBRARY } from "./shared/bot";
 import { shellCommand } from "./shared/commands";
 import {
+  channelDisconnectRpc,
+  channelListRpc,
+  channelWechatLoginPollRpc,
+  channelWechatLoginStartRpc,
   commandAllowRpc,
   commandListRpc,
   commandRemoveRpc,
@@ -87,6 +92,7 @@ export default function contribute(server: PluginServerContext) {
   const relay = new Relay(host, BOT_TOOLS);
   void relay.start().catch((error: unknown) => console.error("paseo-bots: couldn't start the relay", error));
   const scheduler = new RoutineScheduler(host, relay);
+  const channels = new ChannelManager(host, relay);
   const journal = new MemoryJournal();
   const commands = new CommandAllowlist();
   // Every handler and hook receives the plugin's Paseo API; features that start chats need it.
@@ -165,6 +171,19 @@ export default function contribute(server: PluginServerContext) {
   server.handle(routineWebhookRpc, ({ routineId, rotate }) => scheduler.webhookUrl(routineId, rotate));
   server.handle(commandListRpc, async ({ botId }) => ({ rules: await commands.list(botId) }));
   server.handle(commandAllowRpc, async ({ botId, command, cwd }) => ({ rule: await commands.add(botId, command, cwd) }));
+  server.handle(channelListRpc, async ({ botId }, context) => {
+    attach(context);
+    return { accounts: await channels.listForBot(botId) };
+  });
+  server.handle(channelWechatLoginStartRpc, async ({ botId }, context) => {
+    attach(context);
+    return channels.startWechatLogin(botId);
+  });
+  server.handle(channelWechatLoginPollRpc, ({ loginId }) => channels.pollWechatLogin(loginId));
+  server.handle(channelDisconnectRpc, async ({ accountId }, context) => {
+    attach(context);
+    return { ok: await channels.disconnect(accountId) };
+  });
   server.handle(commandRemoveRpc, async ({ botId, id }) => ({ ok: await commands.remove(botId, id) }));
   server.handle(exportBotRpc, async (input) => exportBot(input, await library()));
   server.handle(importBotRpc, importBot);
@@ -189,7 +208,7 @@ export default function contribute(server: PluginServerContext) {
   });
   server.on("agent.turn_ended", async (event, context) => {
     host.attach(context.paseo);
-    await turnEnded(host, journal, scheduler, event).catch((error: unknown) => console.error("paseo-bots: couldn't record a turn", error));
+    await turnEnded(host, journal, scheduler, event, channels).catch((error: unknown) => console.error("paseo-bots: couldn't record a turn", error));
   });
 
   return () => {

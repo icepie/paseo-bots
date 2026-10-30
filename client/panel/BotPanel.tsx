@@ -7,6 +7,7 @@ import { useBotHost, type LocalHost } from "../data";
 import { nativeTokens, useHover } from "../native";
 import { ui } from "../typography";
 import { AccessSection, ModelSection, PermissionsSection } from "./AgentSections";
+import { ChannelsSection } from "./ChannelsSection";
 import { Alert, SearchField, useCompact } from "./controls";
 import { IdentitySection } from "./IdentitySection";
 import { MemorySection, PlaybooksSection, SkillsSection, SoulSection } from "./KnowledgeSections";
@@ -16,7 +17,7 @@ import { tooltip } from "../ui/Tooltip";
 
 type Colors = PluginTheme["colors"];
 
-export type SectionId = "overview" | "identity" | "soul" | "skills" | "playbooks" | "memory" | "routines" | "access" | "model" | "permissions" | "history" | "usage";
+export type SectionId = "overview" | "identity" | "soul" | "skills" | "playbooks" | "memory" | "routines" | "access" | "model" | "permissions" | "channels" | "history" | "usage";
 
 interface SectionEntry {
   id: SectionId;
@@ -58,6 +59,7 @@ const GROUPS: { label: string; sections: SectionEntry[] }[] = [
       { id: "access", label: "Access", icon: "KeyRound", rows: ["Working folder", "Paseo tools", "MCP servers", "Connected apps", "Always allowed"], keywords: "folder directory path mcp tools apps composio gmail slack grants library" },
       { id: "model", label: "Model", icon: "Sparkles", rows: ["Host", "Agent profile", "Provider", "Model", "Thinking"], keywords: "effort reasoning" },
       { id: "permissions", label: "Permissions", icon: "Shield", rows: ["Mode", "Contact other bots", "Allowed commands"], keywords: "approval permissions ask auto bots contact delegate commands allowlist shell" },
+      { id: "channels", label: "Channels", icon: "MessageCircle", rows: ["Connect WeChat"], keywords: "wechat channel im message qr account disconnect" },
     ],
   },
   {
@@ -192,6 +194,8 @@ function renderSection(id: SectionId, props: PanelProps): ReactNode {
       return <ModelSection {...props} />;
     case "permissions":
       return <PermissionsSection {...props} />;
+    case "channels":
+      return <ChannelsSection {...props} />;
     case "history":
       return <HistorySection {...props} />;
     case "usage":

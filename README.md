@@ -73,6 +73,10 @@ With teams, the Bots screen gets a tab for each team, and **Other bots** for bot
 
 Whether a bot may ask others for help is set in its settings under **Permissions → Contact other bots**: **Ask first**, **Allowed** or **Off**. A bot can go on in a chat it started, so back-and-forth work keeps one thread, and an answer that takes longer arrives in the asking chat when the work finishes. Applying or dismissing a proposal card also tells its chat, so the bot can pick up from there.
 
+### Channels
+
+A bot can live on WeChat too: open its settings under **Channels**, press **Connect WeChat** and scan the QR code. Each direct chat with the bot on WeChat then maps to one chat in Paseo — messages in either direction show up on both sides, and the bot's memory and routines work the same. Only the person who scanned the code can reach the bot. Text and voice messages (as their transcription) come through; photos, files and group chats aren't read yet.
+
 ### Skills & Tools
 
 Press **Skills & Tools** at the bottom of the bot list.
