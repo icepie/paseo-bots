@@ -71,7 +71,7 @@ Bots can propose routines too: ask in a chat, then press **Create routine** on t
 
 With teams, the Bots screen gets a tab for each team, and **Other bots** for bots without one (a menu on phones); **+** next to the tabs adds a team, and right-clicking a tab edits it. A team file carries your bots and their teams: find it in **Settings → Plugins**, under **Bots** in the paseo-bots menu.
 
-Whether a bot may ask others for help is set in its settings under **Permissions → Contact other bots**: **Ask first**, **Allowed** or **Off**.
+Whether a bot may ask others for help is set in its settings under **Permissions → Contact other bots**: **Ask first**, **Allowed** or **Off**. A bot can go on in a chat it started, so back-and-forth work keeps one thread, and an answer that takes longer arrives in the asking chat when the work finishes. Applying or dismissing a proposal card also tells its chat, so the bot can pick up from there.
 
 ### Skills & Tools
 
