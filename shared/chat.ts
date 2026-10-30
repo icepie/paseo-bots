@@ -3,6 +3,10 @@ import { BOT_LABEL, buildAgentConfig, defaultModelId, type Bot, type Library, ty
 
 /** Label on chats started by a routine, carrying the routine id. */
 export const ROUTINE_LABEL = "paseo-bots.routine";
+/** Label on a chat started by another bot's ask_bot, carrying the asking bot's id. */
+export const ASKED_BY_LABEL = "paseo-bots.asked-by";
+/** Label on a chat started by ask_bot, carrying the asking chat's id: the answer's wake-up note goes there. */
+export const ASKED_FROM_LABEL = "paseo-bots.asked-from";
 /** Longest title Paseo accepts (protocol/agent-title-limits.ts). */
 const MAX_TITLE_CHARS = 200;
 

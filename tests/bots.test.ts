@@ -18,10 +18,13 @@ interface FakeChat {
   pendingPermissions?: unknown[];
 }
 
-function fakePaseo(chats: Record<string, FakeChat>) {
+function fakePaseo(chats: Record<string, FakeChat>, sent: Array<{ id: string; text: string }> = []) {
   return {
     agents: {
       ref: (id: string) => ({
+        send: async (text: string) => {
+          sent.push({ id, text });
+        },
         refresh: async () => {
           const chat = chats[id];
           return chat ? { agent: { id, status: chat.status, labels: chat.labels, title: chat.title ?? null, pendingPermissions: chat.pendingPermissions ?? [], lastError: null } } : null;
@@ -49,7 +52,8 @@ function fakePaseo(chats: Record<string, FakeChat>) {
 
 describe("asking other bots", () => {
   it("frames the request and returns the other bot's answer", async () => {
-    const { askBot, askPrompt, ASKED_BY_LABEL } = await import("../server/tools/bots");
+    const { askBot, askPrompt } = await import("../server/tools/bots");
+    const { ASKED_BY_LABEL, ASKED_FROM_LABEL } = await import("../shared/chat");
     const scout = makeBot({ id: "bot-scout", name: "Scout" });
     const host = fakeHost([scout, makeBot({ id: "bot-inbox", name: "Inbox" }), makeBot({ id: "bot-old", name: "Old", archived: true })]);
     const chats: Record<string, FakeChat> = { "caller-chat": { status: "running", labels: { "paseo-bots.bot": "bot-scout" } }, "chat-new": { status: "running", labels: {}, reply: "Three unread, one urgent." } };
@@ -61,8 +65,8 @@ describe("asking other bots", () => {
     );
     expect(await askBot.available!(caller)).toBe(true);
     expect(await askBot.run({ bot: "inbox", message: "How many unread mails?" }, caller)).toBe("Inbox answered (chat chat-new):\n\nThree unread, one urgent.");
-    expect(started.at(-1)).toMatchObject({ botId: "bot-inbox", title: "Scout: How many unread mails?", labels: { [ASKED_BY_LABEL]: "bot-scout" } });
-    expect(await askBot.run({ bot: "bot-inbox", message: "Later", wait: false }, caller)).toBe("Asked Inbox in chat chat-new. Use check_chat with that id for the answer.");
+    expect(started.at(-1)).toMatchObject({ botId: "bot-inbox", title: "Scout: How many unread mails?", labels: { [ASKED_BY_LABEL]: "bot-scout", [ASKED_FROM_LABEL]: "caller-chat" } });
+    expect(await askBot.run({ bot: "bot-inbox", message: "Later", wait: false }, caller)).toBe("Asked Inbox in chat chat-new. The answer arrives here when the work finishes; use check_chat with that id to peek.");
     await expect(askBot.run({ bot: "Old", message: "x" }, caller)).rejects.toThrow('There\'s no other bot called "Old". Ask one of: Inbox.');
 
     // A bot answering another bot can't ask further, and "off" hides the tool.
@@ -71,6 +75,33 @@ describe("asking other bots", () => {
     asked.attach(fakePaseo(chats));
     expect(await askBot.available!({ ...caller, host: asked })).toBe(false);
     expect(await askBot.available!({ ...caller, bot: { ...scout, contactBots: "off" } })).toBe(false);
+  });
+
+  it("continues a chat it started with ask_bot, and no other chat", async () => {
+    const { askBot, askPrompt } = await import("../server/tools/bots");
+    const { ASKED_BY_LABEL } = await import("../shared/chat");
+    const scout = makeBot({ id: "bot-scout", name: "Scout" });
+    const host = fakeHost([scout, makeBot({ id: "bot-inbox", name: "Inbox" })]);
+    const sent: Array<{ id: string; text: string }> = [];
+    host.attach(
+      fakePaseo(
+        {
+          asked: { status: "idle", labels: { "paseo-bots.bot": "bot-inbox", [ASKED_BY_LABEL]: "bot-scout" }, reply: "Fixed the bug." },
+          theirs: { status: "idle", labels: { "paseo-bots.bot": "bot-inbox" } },
+        },
+        sent,
+      ),
+    );
+    const caller = { bot: scout, agentId: "caller-chat", host, relay: null as never };
+
+    expect(await askBot.run({ chat_id: "asked", message: "Now re-test it" }, caller)).toBe("Inbox answered (chat asked):\n\nFixed the bug.");
+    expect(sent).toEqual([{ id: "asked", text: askPrompt("Scout", "Now re-test it") }]);
+    expect(await askBot.run({ chat_id: "asked", message: "Again", wait: false }, caller)).toBe(
+      "Sent your message to Inbox in chat asked. The answer arrives here when the work finishes; use check_chat with that id to peek.",
+    );
+    await expect(askBot.run({ chat_id: "theirs", message: "x" }, caller)).rejects.toThrow("only continue your own chats");
+    await expect(askBot.run({ chat_id: "nope", message: "x" }, caller)).rejects.toThrow("no chat with that id");
+    await expect(askBot.run({ message: "x" }, caller)).rejects.toThrow("Name a bot to ask");
   });
 
   it("checks only the bot's own chats and the ones it asked", async () => {

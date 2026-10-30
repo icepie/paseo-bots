@@ -2,6 +2,8 @@ import type { PaseoApi } from "../paseo";
 import { z } from "zod";
 import { foldText, lastTurn } from "../../shared/activity";
 import { BOT_LABEL } from "../../shared/bot";
+import { ASKED_BY_LABEL, ASKED_FROM_LABEL } from "../../shared/chat";
+import { watchingChat } from "../ask-notify";
 import { startChat } from "../chats";
 import { defineTool, type ToolCaller } from "./mcp";
 
@@ -23,8 +25,6 @@ export const listBots = defineTool({
   },
 });
 
-/** Label on a chat started by another bot's ask_bot, carrying the asking bot's id. */
-export const ASKED_BY_LABEL = "paseo-bots.asked-by";
 /** MCP clients give up on a tool call after about a minute (Codex after 60 seconds), so answers are awaited a little less. */
 const ASK_WAIT_MS = 50_000;
 const REPLY_MAX = 8_000;
@@ -79,24 +79,43 @@ async function mayAsk({ bot, agentId, host }: ToolCaller): Promise<boolean> {
 export const askBot = defineTool({
   name: "ask_bot",
   description:
-    "Ask another bot on this Paseo for help. It gets your message in a new chat of its own, works with its own tools and settings, and its answer comes back here. Use list_bots to see who does what.",
+    "Ask another bot on this Paseo for help. It works with its own tools and settings, and its answer comes back here. Pass chat_id from an earlier ask_bot to go on in that chat, so the other bot keeps what it learned. Use list_bots to see who does what. An answer that takes longer arrives as a message in this chat when the work finishes.",
   input: z.object({
-    bot: z.string().min(1).max(100).describe("The other bot's name or id."),
+    bot: z.string().min(1).max(100).optional().describe("The other bot's name or id. Needed to start a new chat; with chat_id the chat's bot answers."),
     message: z.string().min(1).max(20_000).describe("What you need, written so the other bot can act on it without this chat."),
-    wait: z.boolean().optional().describe("Wait up to about 50 seconds for the answer (the default). With false, return at once and use check_chat later."),
+    chat_id: z.string().min(1).max(100).optional().describe("A chat id an earlier ask_bot gave you, to continue that chat instead of starting a new one."),
+    wait: z.boolean().optional().describe("Wait up to about 50 seconds for the answer (the default). With false, return at once and the answer arrives here when the work finishes."),
   }),
   available: mayAsk,
-  async run({ bot: wanted, message, wait = true }, caller) {
-    const { bot, host, relay } = caller;
-    const others = (await host.bots()).filter((entry) => entry.id !== bot.id && !entry.archived);
-    const key = wanted.trim().toLowerCase();
-    const target = others.find((entry) => entry.id === wanted.trim()) ?? others.find((entry) => entry.name.trim().toLowerCase() === key);
-    if (!target) throw new Error(others.length ? `There's no other bot called "${wanted}". Ask one of: ${others.map((entry) => entry.name).join(", ")}.` : "There are no other bots to ask.");
-    const chatId = await startChat(host, relay, target, { prompt: askPrompt(bot.name, message), title: `${bot.name}: ${foldText(message, 60)}`, labels: { [ASKED_BY_LABEL]: bot.id } });
-    if (!wait) return `Asked ${target.name} in chat ${chatId}. Use check_chat with that id for the answer.`;
+  async run({ bot: wanted, message, chat_id: continueId, wait = true }, caller) {
+    const { bot, host, relay, agentId } = caller;
     const paseo = host.requirePaseo();
-    await paseo.agents.ref(chatId).waitForFinish(ASK_WAIT_MS).catch(() => null);
-    return describeChat(await readChat(paseo, chatId), target.name, chatId);
+    let who: string;
+    let chatId: string;
+    if (continueId?.trim()) {
+      chatId = continueId.trim();
+      const chat = await readChat(paseo, chatId);
+      const owner = chat.labels[BOT_LABEL];
+      if (owner !== bot.id && chat.labels[ASKED_BY_LABEL] !== bot.id) throw new Error("You can only continue your own chats and ones you started with ask_bot.");
+      who = owner === bot.id ? "You" : ((await host.bot(owner ?? ""))?.name ?? "The other bot");
+      await paseo.agents.ref(chatId).send(askPrompt(bot.name, message));
+    } else {
+      if (!wanted?.trim()) throw new Error("Name a bot to ask, or pass chat_id to continue an earlier chat.");
+      const others = (await host.bots()).filter((entry) => entry.id !== bot.id && !entry.archived);
+      const key = wanted.trim().toLowerCase();
+      const target = others.find((entry) => entry.id === wanted.trim()) ?? others.find((entry) => entry.name.trim().toLowerCase() === key);
+      if (!target) throw new Error(others.length ? `There's no other bot called "${wanted}". Ask one of: ${others.map((entry) => entry.name).join(", ")}.` : "There are no other bots to ask.");
+      who = target.name;
+      chatId = await startChat(host, relay, target, { prompt: askPrompt(bot.name, message), title: `${bot.name}: ${foldText(message, 60)}`, labels: { [ASKED_BY_LABEL]: bot.id, [ASKED_FROM_LABEL]: agentId } });
+    }
+    if (!wait) {
+      const done = `The answer arrives here when the work finishes; use check_chat with that id to peek.`;
+      return continueId?.trim() ? `Sent your message to ${who} in chat ${chatId}. ${done}` : `Asked ${who} in chat ${chatId}. ${done}`;
+    }
+    return watchingChat(chatId, async () => {
+      await paseo.agents.ref(chatId).waitForFinish(ASK_WAIT_MS).catch(() => null);
+      return describeChat(await readChat(paseo, chatId), who, chatId);
+    });
   },
 });
 
@@ -113,8 +132,10 @@ export const checkChat = defineTool({
     const owner = chat.labels[BOT_LABEL];
     if (owner !== bot.id && chat.labels[ASKED_BY_LABEL] !== bot.id) throw new Error("You can only check your own chats and ones you started with ask_bot.");
     if (wait && chat.state === "running") {
-      await paseo.agents.ref(chatId.trim()).waitForFinish(ASK_WAIT_MS).catch(() => null);
-      chat = await readChat(paseo, chatId.trim());
+      chat = await watchingChat(chatId.trim(), async () => {
+        await paseo.agents.ref(chatId.trim()).waitForFinish(ASK_WAIT_MS).catch(() => null);
+        return readChat(paseo, chatId.trim());
+      });
     }
     const who = owner === bot.id ? "You" : ((await host.bot(owner ?? ""))?.name ?? "The other bot");
     return `"${chat.title}": ${describeChat(chat, who, chatId.trim())}`;
