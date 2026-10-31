@@ -192,7 +192,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(uploadRpc, saveUpload);
   server.on("agent.turn_started", async (event, context) => {
     host.attach(context.paseo);
-    await turnStarted(host, journal, event).catch((error: unknown) => console.error("paseo-bots: couldn't check memory before a turn", error));
+    await turnStarted(host, journal, event, channels).catch((error: unknown) => console.error("paseo-bots: couldn't check memory before a turn", error));
   });
   // A bot's saved commands (exact command, exact folder) are approved here instead of asking.
   server.on("agent.permission_requested", async ({ agent, request }, context) => {

@@ -39,8 +39,8 @@ export interface QRStatus {
 
 /** Media that arrived with a message; bytes sit encrypted on WeChat's CDN. */
 export interface InboundMedia {
-  kind: "image" | "file";
-  /** Original file name (files only; images get named on save). */
+  kind: MediaKind;
+  /** Original file name (files only; other kinds get named on save). */
   name: string | null;
   /** CDN download reference. */
   cdnParam: string;
@@ -48,7 +48,14 @@ export interface InboundMedia {
   aesKeyHex: string | null;
   /** AES key as base64 — of raw 16 bytes, or of their hex string. */
   aesKeyBase64: string | null;
+  /** Voice sample rate (needed to decode SILK). */
+  sampleRate: number | null;
 }
+
+export type MediaKind = "image" | "video" | "file" | "voice";
+
+/** getuploadurl's media_type per kind (iLink's UploadMediaType). */
+const MEDIA_TYPE: Record<MediaKind, number> = { image: 1, video: 2, file: 3, voice: 4 };
 
 export interface InboundMessage {
   messageId: number | null;
@@ -178,9 +185,10 @@ export class ILinkClient {
         item_list?: Array<{
           type?: number;
           text_item?: { text?: string };
-          voice_item?: { text?: string };
+          voice_item?: { text?: string; media?: { encrypt_query_param?: string; aes_key?: string }; sample_rate?: number };
           image_item?: { media?: { encrypt_query_param?: string; aes_key?: string }; aeskey?: string };
           file_item?: { media?: { encrypt_query_param?: string; aes_key?: string }; file_name?: string };
+          video_item?: { media?: { encrypt_query_param?: string; aes_key?: string } };
         }>;
       }>;
       get_updates_buf?: string;
@@ -197,9 +205,14 @@ export class ILinkClient {
         if (item.type === 1 && item.text_item?.text != null) text = item.text_item.text;
         else if (item.type === 3 && item.voice_item?.text) text = item.voice_item.text;
         else if (item.type === 2 && item.image_item?.media?.encrypt_query_param) {
-          media = { kind: "image", name: null, cdnParam: item.image_item.media.encrypt_query_param, aesKeyHex: item.image_item.aeskey ?? null, aesKeyBase64: item.image_item.media.aes_key ?? null };
+          media = { kind: "image", name: null, cdnParam: item.image_item.media.encrypt_query_param, aesKeyHex: item.image_item.aeskey ?? null, aesKeyBase64: item.image_item.media.aes_key ?? null, sampleRate: null };
         } else if (item.type === 4 && item.file_item?.media?.encrypt_query_param) {
-          media = { kind: "file", name: item.file_item.file_name ?? null, cdnParam: item.file_item.media.encrypt_query_param, aesKeyHex: null, aesKeyBase64: item.file_item.media.aes_key ?? null };
+          media = { kind: "file", name: item.file_item.file_name ?? null, cdnParam: item.file_item.media.encrypt_query_param, aesKeyHex: null, aesKeyBase64: item.file_item.media.aes_key ?? null, sampleRate: null };
+        } else if (item.type === 5 && item.video_item?.media?.encrypt_query_param) {
+          media = { kind: "video", name: null, cdnParam: item.video_item.media.encrypt_query_param, aesKeyHex: null, aesKeyBase64: item.video_item.media.aes_key ?? null, sampleRate: null };
+        } else if (item.type === 3 && item.voice_item?.media?.encrypt_query_param) {
+          // Voice without a transcription: keep the audio itself (SILK).
+          media = { kind: "voice", name: null, cdnParam: item.voice_item.media.encrypt_query_param, aesKeyHex: null, aesKeyBase64: item.voice_item.media.aes_key ?? null, sampleRate: item.voice_item.sample_rate ?? null };
         } else if (item.type === 2 || item.type === 4 || item.type === 5) unsupported = true;
       }
       // Media without its key can never be decrypted — treat it as unreadable.
@@ -221,10 +234,10 @@ export class ILinkClient {
   }
 
   /** Upload step 1: trade the file's coordinates for a CDN upload URL. */
-  private async getUploadUrl(toUserId: string, kind: InboundMedia["kind"], filekey: string, rawSize: number, rawMd5: string, cipherSize: number, aesKeyHex: string): Promise<string> {
+  private async getUploadUrl(toUserId: string, kind: MediaKind, filekey: string, rawSize: number, rawMd5: string, cipherSize: number, aesKeyHex: string): Promise<string> {
     const data = await this.post<{ upload_param?: string; upload_full_url?: string }>("ilink/bot/getuploadurl", {
       filekey,
-      media_type: kind === "image" ? 1 : 3,
+      media_type: MEDIA_TYPE[kind],
       to_user_id: toUserId,
       rawsize: rawSize,
       rawfilemd5: rawMd5,
@@ -240,7 +253,7 @@ export class ILinkClient {
   }
 
   /** Upload a file's bytes (encrypted) to the CDN; the result goes into sendMedia. */
-  async uploadMedia(kind: InboundMedia["kind"], toUserId: string, plaintext: Buffer): Promise<UploadedMedia> {
+  async uploadMedia(kind: MediaKind, toUserId: string, plaintext: Buffer): Promise<UploadedMedia> {
     const rawSize = plaintext.length;
     const rawMd5 = createHash("md5").update(plaintext).digest("hex");
     const cipherSize = Math.ceil((rawSize + 1) / 16) * 16;
@@ -271,9 +284,17 @@ export class ILinkClient {
     return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   }
 
-  /** A media message: one image or file item, context token echoed. */
-  async sendMedia(toUserId: string, contextToken: string | null, kind: InboundMedia["kind"], name: string, uploaded: UploadedMedia): Promise<void> {
+  /** A media message: one image/video/file/voice item, context token echoed. */
+  async sendMedia(toUserId: string, contextToken: string | null, kind: MediaKind, name: string, uploaded: UploadedMedia, playtimeMs: number | null = null): Promise<void> {
     const media = { encrypt_query_param: uploaded.downloadParam, aes_key: uploaded.aesKeyBase64, encrypt_type: 1 };
+    const item =
+      kind === "image"
+        ? { type: 2, image_item: { media, mid_size: uploaded.cipherSize } }
+        : kind === "video"
+          ? { type: 5, video_item: { media, video_size: uploaded.cipherSize } }
+          : kind === "voice"
+            ? { type: 3, voice_item: { media, encode_type: 6, sample_rate: 24000, playtime: playtimeMs ?? undefined } }
+            : { type: 4, file_item: { media, file_name: name, len: String(uploaded.rawSize) } };
     await this.post("ilink/bot/sendmessage", {
       msg: {
         from_user_id: "",
@@ -282,10 +303,21 @@ export class ILinkClient {
         message_type: 2,
         message_state: 2,
         context_token: contextToken ?? undefined,
-        item_list: [kind === "image" ? { type: 2, image_item: { media, mid_size: uploaded.cipherSize } } : { type: 4, file_item: { media, file_name: name, len: String(uploaded.rawSize) } }],
+        item_list: [item],
       },
       base_info: { channel_version: "paseo-bots" },
     }, API_TIMEOUT_MS);
+  }
+
+  /** The typing ticket for one conversation (base64; short-lived). */
+  async getConfig(toUserId: string, contextToken: string | null): Promise<string | null> {
+    const data = await this.post<{ typing_ticket?: string }>("ilink/bot/getconfig", { ilink_user_id: toUserId, context_token: contextToken ?? undefined, base_info: { channel_version: "paseo-bots" } }, 10_000);
+    return data.typing_ticket ?? null;
+  }
+
+  /** Show ("typing", 1) or hide ("cancel", 2) the bot's typing indicator. */
+  async sendTyping(toUserId: string, typingTicket: string, status: 1 | 2): Promise<void> {
+    await this.post("ilink/bot/sendtyping", { ilink_user_id: toUserId, typing_ticket: typingTicket, status, base_info: { channel_version: "paseo-bots" } }, 10_000);
   }
 
   /** Plain-text reply to one user, chunked to WeChat's message size. */

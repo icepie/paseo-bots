@@ -24,6 +24,8 @@ describe("iLink client", () => {
         { message_id: 5, message_type: 1, from_user_id: "u4", item_list: [{ type: 2, image_item: { media: { encrypt_query_param: "cdn-img", aes_key: "a2V5" }, aeskey: "00112233445566778899aabbccddeeff" } }] },
         { message_id: 6, message_type: 1, from_user_id: "u5", item_list: [{ type: 4, file_item: { media: { encrypt_query_param: "cdn-file", aes_key: "a2V5" }, file_name: "报表.xlsx" } }] },
         { message_id: 7, message_type: 1, from_user_id: "u6", item_list: [{ type: 2, image_item: { media: { encrypt_query_param: "cdn-keyless" } } }] },
+        { message_id: 8, message_type: 1, from_user_id: "u7", item_list: [{ type: 5, video_item: { media: { encrypt_query_param: "cdn-vid", aes_key: "a2V5" } } }] },
+        { message_id: 9, message_type: 1, from_user_id: "u8", item_list: [{ type: 3, voice_item: { media: { encrypt_query_param: "cdn-voice", aes_key: "a2V5" }, sample_rate: 8000 } }] },
       ],
       get_updates_buf: "buf-2",
       longpolling_timeout_ms: 30_000,
@@ -40,10 +42,13 @@ describe("iLink client", () => {
       { messageId: 1, fromUserId: "u1", groupId: null, text: "hello", contextToken: "ctx", media: null, unsupported: false },
       { messageId: 3, fromUserId: "u2", groupId: null, text: "said aloud", contextToken: null, media: null, unsupported: false },
       { messageId: 4, fromUserId: "u3", groupId: "g1", text: "", contextToken: null, media: null, unsupported: true },
-      { messageId: 5, fromUserId: "u4", groupId: null, text: "", contextToken: null, media: { kind: "image", name: null, cdnParam: "cdn-img", aesKeyHex: "00112233445566778899aabbccddeeff", aesKeyBase64: "a2V5" }, unsupported: false },
-      { messageId: 6, fromUserId: "u5", groupId: null, text: "", contextToken: null, media: { kind: "file", name: "报表.xlsx", cdnParam: "cdn-file", aesKeyHex: null, aesKeyBase64: "a2V5" }, unsupported: false },
+      { messageId: 5, fromUserId: "u4", groupId: null, text: "", contextToken: null, media: { kind: "image", name: null, cdnParam: "cdn-img", aesKeyHex: "00112233445566778899aabbccddeeff", aesKeyBase64: "a2V5", sampleRate: null }, unsupported: false },
+      { messageId: 6, fromUserId: "u5", groupId: null, text: "", contextToken: null, media: { kind: "file", name: "报表.xlsx", cdnParam: "cdn-file", aesKeyHex: null, aesKeyBase64: "a2V5", sampleRate: null }, unsupported: false },
       // Media without its key can never be decrypted — reported as unreadable.
       { messageId: 7, fromUserId: "u6", groupId: null, text: "", contextToken: null, media: null, unsupported: true },
+      { messageId: 8, fromUserId: "u7", groupId: null, text: "", contextToken: null, media: { kind: "video", name: null, cdnParam: "cdn-vid", aesKeyHex: null, aesKeyBase64: "a2V5", sampleRate: null }, unsupported: false },
+      // Voice without a transcription keeps the audio and its sample rate.
+      { messageId: 9, fromUserId: "u8", groupId: null, text: "", contextToken: null, media: { kind: "voice", name: null, cdnParam: "cdn-voice", aesKeyHex: null, aesKeyBase64: "a2V5", sampleRate: 8000 }, unsupported: false },
     ]);
     expect(updates.syncBuf).toBe("buf-2");
     expect(requests).toMatchObject([{ url: "https://ilink.test/ilink/bot/getupdates", body: { get_updates_buf: "buf-1" }, authorization: "Bearer tok" }]);
@@ -74,11 +79,11 @@ describe("iLink client", () => {
     const client = new ILinkClient("https://ilink.test", null, (async () => new Response(new Uint8Array(encrypted))) as never);
 
     // Images: the key arrives hex-encoded on the item.
-    await expect(client.downloadMedia({ kind: "image", name: null, cdnParam: "p1", aesKeyHex: key.toString("hex"), aesKeyBase64: null })).resolves.toEqual(plain);
+    await expect(client.downloadMedia({ kind: "image", name: null, cdnParam: "p1", aesKeyHex: key.toString("hex"), aesKeyBase64: null, sampleRate: null })).resolves.toEqual(plain);
     // Files: base64 of the raw 16 key bytes.
-    await expect(client.downloadMedia({ kind: "file", name: "a.bin", cdnParam: "p2", aesKeyHex: null, aesKeyBase64: key.toString("base64") })).resolves.toEqual(plain);
+    await expect(client.downloadMedia({ kind: "file", name: "a.bin", cdnParam: "p2", aesKeyHex: null, aesKeyBase64: key.toString("base64"), sampleRate: null })).resolves.toEqual(plain);
     // Files again: base64 of the key's hex string.
-    await expect(client.downloadMedia({ kind: "file", name: "a.bin", cdnParam: "p3", aesKeyHex: null, aesKeyBase64: Buffer.from(key.toString("hex"), "utf-8").toString("base64") })).resolves.toEqual(plain);
+    await expect(client.downloadMedia({ kind: "file", name: "a.bin", cdnParam: "p3", aesKeyHex: null, aesKeyBase64: Buffer.from(key.toString("hex"), "utf-8").toString("base64"), sampleRate: null })).resolves.toEqual(plain);
   });
 
   it("uploads encrypted media and sends it with the CDN coordinates", async () => {
@@ -121,6 +126,28 @@ describe("iLink client", () => {
     await sending.sendMedia("u1", "ctx-1", "image", "photo.png", uploaded);
     expect(sent[0].msg.context_token).toBe("ctx-1");
     expect(sent[0].msg.item_list).toEqual([{ type: 2, image_item: { media: { encrypt_query_param: "dl-param", aes_key: uploaded.aesKeyBase64, encrypt_type: 1 }, mid_size: uploaded.cipherSize } }]);
+    // Video and voice items carry their own shapes on the wire.
+    await sending.sendMedia("u1", "ctx-1", "video", "clip.mp4", uploaded);
+    expect(sent[1].msg.item_list).toEqual([{ type: 5, video_item: { media: { encrypt_query_param: "dl-param", aes_key: uploaded.aesKeyBase64, encrypt_type: 1 }, video_size: uploaded.cipherSize } }]);
+    await sending.sendMedia("u1", "ctx-1", "voice", "note.mp3", uploaded, 1500);
+    expect(sent[2].msg.item_list).toEqual([{ type: 3, voice_item: { media: { encrypt_query_param: "dl-param", aes_key: uploaded.aesKeyBase64, encrypt_type: 1 }, encode_type: 6, sample_rate: 24000, playtime: 1500 } }]);
+  });
+
+  it("fetches a typing ticket and drives the typing indicator", async () => {
+    const { ILinkClient } = await import("../server/channels/ilink");
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const client = new ILinkClient("https://ilink.test", "tok", (async (url: string, init: { body: string }) => {
+      const path = url.split("/ilink/bot/")[1];
+      calls.push({ path, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify(path === "getconfig" ? { ret: 0, typing_ticket: "ticket-1" } : { ret: 0 }));
+    }) as never);
+
+    expect(await client.getConfig("u1", "ctx-1")).toBe("ticket-1");
+    await client.sendTyping("u1", "ticket-1", 1);
+    expect(calls).toEqual([
+      { path: "getconfig", body: { ilink_user_id: "u1", context_token: "ctx-1", base_info: { channel_version: "paseo-bots" } } },
+      { path: "sendtyping", body: { ilink_user_id: "u1", typing_ticket: "ticket-1", status: 1, base_info: { channel_version: "paseo-bots" } } },
+    ]);
   });
 
   it("maps the confirmed login's snake_case fields", async () => {
@@ -144,25 +171,28 @@ describe("iLink client", () => {
 });
 
 describe("channel manager", () => {
-  it("logs in by QR, routes direct chats to one Paseo chat each, and replies over the channel", async () => {
+  it("logs in by QR, routes direct and group chats to one Paseo chat each, and replies over the channel", async () => {
     const { ChannelManager } = await import("../server/channels/manager");
     const bot = makeBot({ id: "bot-1", name: "Inbox" });
     const host = fakeHost([bot]);
     const sentToChats: Array<{ id: string; text: string }> = [];
     const sentToWechat: Array<{ to: string; ctx: string | null; text: string }> = [];
+    const typed: Array<{ to: string; status: number }> = [];
     const updates: InboundMessage[] = [
       { messageId: 1, fromUserId: "owner-1", groupId: null, text: "hello bot", contextToken: "ctx-1", media: null, unsupported: false },
       { messageId: 2, fromUserId: "stranger", groupId: null, text: "hi", contextToken: null, media: null, unsupported: false },
       { messageId: 3, fromUserId: "owner-1", groupId: "group-1", text: "group hi", contextToken: null, media: null, unsupported: false },
-      { messageId: 4, fromUserId: "owner-1", groupId: null, text: "", contextToken: "ctx-1b", media: { kind: "image", name: null, cdnParam: "cdn-1", aesKeyHex: "00112233445566778899aabbccddeeff", aesKeyBase64: null }, unsupported: false },
-      { messageId: 5, fromUserId: "owner-1", groupId: null, text: "second", contextToken: "ctx-2", media: null, unsupported: false },
+      { messageId: 4, fromUserId: "owner-1", groupId: null, text: "", contextToken: "ctx-1b", media: { kind: "image", name: null, cdnParam: "cdn-1", aesKeyHex: "00112233445566778899aabbccddeeff", aesKeyBase64: null, sampleRate: null }, unsupported: false },
+      { messageId: 5, fromUserId: "owner-1", groupId: null, text: "", contextToken: null, media: { kind: "voice", name: null, cdnParam: "cdn-2", aesKeyHex: null, aesKeyBase64: "a2V5", sampleRate: 24000 }, unsupported: false },
+      { messageId: 6, fromUserId: "owner-1", groupId: null, text: "", contextToken: null, media: { kind: "video", name: null, cdnParam: "cdn-3", aesKeyHex: null, aesKeyBase64: "a2V5", sampleRate: null }, unsupported: false },
+      { messageId: 7, fromUserId: "owner-1", groupId: null, text: "second", contextToken: "ctx-2", media: null, unsupported: false },
     ];
     // Deterministic signals: the monitor's first poll proves login persisted and
-    // monitoring started; the second chat send proves the whole first batch ran.
+    // monitoring started; the last chat send proves the whole first batch ran.
     const monitoring = Promise.withResolvers<void>();
     const batchDone = Promise.withResolvers<void>();
     const uploadedMedia: Array<{ kind: string; to: string; size: number }> = [];
-    const sentMedia: Array<{ to: string; ctx: string | null; kind: string; name: string }> = [];
+    const sentMedia: Array<{ to: string; ctx: string | null; kind: string; name: string; playtime: number | null }> = [];
     const fake = {
       setToken: () => {},
       getQRCode: async () => ({ qrcode: "q1", qrUrl: "https://qr/1" }),
@@ -185,7 +215,9 @@ describe("channel manager", () => {
         uploadedMedia.push({ kind, to, size: bytes.length });
         return { downloadParam: "dl", aesKeyBase64: "aw==", rawSize: bytes.length, cipherSize: bytes.length + 8 };
       },
-      sendMedia: async (to: string, ctx: string | null, kind: string, name: string) => void sentMedia.push({ to, ctx, kind, name }),
+      sendMedia: async (to: string, ctx: string | null, kind: string, name: string, _uploaded: unknown, playtime: number | null = null) => void sentMedia.push({ to, ctx, kind, name, playtime }),
+      getConfig: async () => "ticket-1",
+      sendTyping: async (to: string, _ticket: string, status: number) => void typed.push({ to, status }),
     };
     const startedChats: Array<{ prompt: string; title: string; labels: Record<string, string> }> = [];
     const manager: ChannelManager = new ChannelManager(
@@ -194,8 +226,9 @@ describe("channel manager", () => {
       () => fake as unknown as ILinkClient,
       (async (_h: never, _r: never, _b: never, input: { prompt: string; title: string; labels: Record<string, string> }) => {
         startedChats.push(input);
-        return "chat-1";
+        return `chat-${startedChats.length}`;
       }) as never,
+      { toSilk: async () => ({ silk: Buffer.from("silk-bytes"), playtimeMs: 1500 }), silkToWav: async () => Buffer.from("wav-bytes") } as never,
     );
     host.attach({
       agents: {
@@ -216,23 +249,40 @@ describe("channel manager", () => {
     expect(accounts).toMatchObject([{ type: "wechat", ilinkBotId: "wx@im.bot", ownerUserId: "owner-1", running: true }]);
 
     await batchDone.promise;
-    expect(startedChats).toHaveLength(1);
+    // The direct chat and the group each got their own Paseo chat.
+    expect(startedChats).toHaveLength(2);
     expect(startedChats[0]).toMatchObject({ title: "WeChat: owner-1", labels: { "paseo-bots.channel-account": accounts[0].id, "paseo-bots.channel-from": "owner-1" } });
+    expect(startedChats[1]).toMatchObject({ title: "WeChat group: group-1", labels: { "paseo-bots.channel-account": accounts[0].id, "paseo-bots.channel-from": "group-1" } });
     // The first message carries the channel note, then the owner's text.
     expect(startedChats[0].prompt).toContain("![caption](/absolute/path.png)");
     expect(startedChats[0].prompt.endsWith("hello bot")).toBe(true);
-    // The stranger and the group message never reached the bot. The photo was
-    // decrypted into the bot's folder and the note went into the same chat.
+    // Group chats get the group note and every message is sender-prefixed.
+    expect(startedChats[1].prompt).toContain("the WeChat group this chat mirrors");
+    expect(startedChats[1].prompt.endsWith("[owner-1 on WeChat] group hi")).toBe(true);
+    // The stranger never reached the bot. The photo, voice message and video
+    // were decrypted into the bot's folder and their notes went into the chat.
     const { botDataPath } = await import("../server/bot-home");
-    const photoPath = join(botDataPath("bot-1"), "media", "photo-4.png");
     expect(sentToChats).toEqual([
       { id: "chat-1", text: "[They sent a photo over WeChat — saved to media/photo-4.png in your folder; open it with your tools to see it.]" },
+      { id: "chat-1", text: "[They sent a voice message over WeChat — saved to media/voice-5.wav in your folder; open it with your tools to see it.]" },
+      { id: "chat-1", text: "[They sent a video over WeChat — saved to media/video-6.mp4 in your folder; open it with your tools to see it.]" },
       { id: "chat-1", text: "second" },
     ]);
-    expect(await readFile(photoPath)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x66, 0x61, 0x6b, 0x65]));
+    expect(await readFile(join(botDataPath("bot-1"), "media", "photo-4.png"))).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x66, 0x61, 0x6b, 0x65]));
+    // Voice landed as decoded WAV, not raw SILK.
+    expect(await readFile(join(botDataPath("bot-1"), "media", "voice-5.wav"))).toEqual(Buffer.from("wav-bytes"));
 
+    // A reply goes back over the channel and lowers the typing indicator.
+    await manager.typing(accounts[0].id, "owner-1", 1);
     await manager.sendReply(accounts[0].id, "owner-1", "the answer");
     expect(sentToWechat).toEqual([{ to: "owner-1", ctx: "ctx-2", text: "the answer" }]);
+    expect(typed).toEqual([
+      { to: "owner-1", status: 1 },
+      { to: "owner-1", status: 2 },
+    ]);
+    // A group reply goes to the group.
+    await manager.sendReply(accounts[0].id, "group-1", "group answer");
+    expect(sentToWechat[1]).toEqual({ to: "group-1", ctx: null, text: "group answer" });
 
     // Reply markup: an image embed and a file directive travel as media.
     const shotPath = join(process.env.PASEO_HOME ?? "", "shot.png");
@@ -240,14 +290,29 @@ describe("channel manager", () => {
     await writeFile(shotPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x66, 0x61, 0x6b, 0x65]));
     await writeFile(docPath, "meeting notes");
     await manager.sendReply(accounts[0].id, "owner-1", `看这些\n![截图](${shotPath})\n和 [file: ${docPath}] 吧`);
-    expect(sentToWechat[1]).toEqual({ to: "owner-1", ctx: "ctx-2", text: "看这些\n\n和  吧" });
+    expect(sentToWechat[2]).toEqual({ to: "owner-1", ctx: "ctx-2", text: "看这些\n\n和  吧" });
     expect(uploadedMedia).toEqual([
       { kind: "image", to: "owner-1", size: 8 },
       { kind: "file", to: "owner-1", size: 13 },
     ]);
     expect(sentMedia).toEqual([
-      { to: "owner-1", ctx: "ctx-2", kind: "image", name: "shot.png" },
-      { to: "owner-1", ctx: "ctx-2", kind: "file", name: "notes.txt" },
+      { to: "owner-1", ctx: "ctx-2", kind: "image", name: "shot.png", playtime: null },
+      { to: "owner-1", ctx: "ctx-2", kind: "file", name: "notes.txt", playtime: null },
+    ]);
+
+    // Video and voice directives: voice is SILK-encoded before upload.
+    const clipPath = join(process.env.PASEO_HOME ?? "", "clip.mp4");
+    const notePath = join(process.env.PASEO_HOME ?? "", "note.mp3");
+    await writeFile(clipPath, "fake-video");
+    await writeFile(notePath, "fake-audio");
+    await manager.sendReply(accounts[0].id, "owner-1", `[video: ${clipPath}]\n[voice: ${notePath}]`);
+    expect(uploadedMedia.slice(2)).toEqual([
+      { kind: "video", to: "owner-1", size: 10 },
+      { kind: "voice", to: "owner-1", size: 10 },
+    ]);
+    expect(sentMedia.slice(2)).toEqual([
+      { to: "owner-1", ctx: "ctx-2", kind: "video", name: "clip.mp4", playtime: null },
+      { to: "owner-1", ctx: "ctx-2", kind: "voice", name: "note.mp3", playtime: 1500 },
     ]);
 
     expect(await manager.disconnect(accounts[0].id)).toBe(true);

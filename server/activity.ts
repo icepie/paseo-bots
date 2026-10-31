@@ -11,9 +11,13 @@ import type { RoutineScheduler } from "./scheduler";
 // What happens around each turn of a bot's chat: the journal notes memory
 // changes, and the daily log gets a line saying what the bot did.
 
-export async function turnStarted(host: BotsHost, journal: MemoryJournal, { agent }: PluginLifecycleEvents["agent.turn_started"]): Promise<void> {
+export async function turnStarted(host: BotsHost, journal: MemoryJournal, { agent }: PluginLifecycleEvents["agent.turn_started"], channels?: Pick<ChannelManager, "typing">): Promise<void> {
   const botId = await host.botIdOf(agent.id);
   if (botId) await journal.begin(botId);
+  // A channel chat shows "typing…" on WeChat while the turn runs.
+  const chat = await host.chatOf(agent.id);
+  const channel = chat ? channelOf(chat.labels) : null;
+  if (channels && channel) await channels.typing(channel.accountId, channel.fromUserId, 1).catch((error: unknown) => console.error("paseo-bots: couldn't show the typing indicator", error));
 }
 
 /**
@@ -36,7 +40,7 @@ export async function turnEnded(
   journal: MemoryJournal,
   scheduler: Pick<RoutineScheduler, "finished">,
   { agent, outcome, timeline }: PluginLifecycleEvents["agent.turn_ended"],
-  channels?: Pick<ChannelManager, "sendReply">,
+  channels?: Pick<ChannelManager, "sendReply" | "typing">,
 ): Promise<void> {
   const chat = await host.chatOf(agent.id);
   if (!chat) return;
@@ -58,7 +62,12 @@ export async function turnEnded(
   const channel = channelOf(chat.labels);
   if (channels && channel) {
     const text = outcome.kind === "failed" ? channelFailure(outcome.error.message) : reply.trim();
-    if (text) await channels.sendReply(channel.accountId, channel.fromUserId, text).catch((error: unknown) => console.error("paseo-bots: couldn't send the chat's reply over its channel", error));
+    if (text) {
+      // sendReply also lowers the typing indicator once everything is sent.
+      await channels.sendReply(channel.accountId, channel.fromUserId, text).catch((error: unknown) => console.error("paseo-bots: couldn't send the chat's reply over its channel", error));
+    } else {
+      await channels.typing(channel.accountId, channel.fromUserId, 2).catch(() => {});
+    }
   }
 }
 

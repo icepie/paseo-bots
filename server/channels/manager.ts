@@ -7,7 +7,9 @@ import { botDataPath, pluginDataPath } from "../bot-home";
 import { startChat } from "../chats";
 import type { BotsHost } from "../host";
 import type { Relay } from "../relay";
-import { ILINK_BASE_URL, ILinkClient, ILinkError, type InboundMessage } from "./ilink";
+import { ILINK_BASE_URL, ILinkClient, ILinkError, type InboundMessage, type MediaKind } from "./ilink";
+import type * as VoiceCodec from "./voice";
+import { silkToWav, toSilk } from "./voice";
 
 /**
  * Runs the IM channel accounts (WeChat over iLink): a long-poll monitor per
@@ -59,10 +61,13 @@ function allows(account: ChannelAccount, fromUserId: string): boolean {
 }
 
 /** First message of a channel chat: what the channel can carry, said once. */
-const CHANNEL_NOTE = "[This chat is connected to WeChat: your replies here are delivered to the person on WeChat. To send them an image, put ![caption](/absolute/path.png) in a reply; for any other file, put [file: /absolute/path].]";
+function channelNote(group: boolean): string {
+  const where = group ? "the WeChat group this chat mirrors" : "the person on WeChat";
+  return `[This chat is connected to WeChat: your replies here are delivered to ${where}. To send an image, put ![caption](/absolute/path.png) in a reply; a video: [video: /absolute/path.mp4]; a voice message: [voice: /absolute/audio.mp3]; any other file: [file: /absolute/path].]`;
+}
 
-/** Reply markup the note above promises: an image embed, or a file directive. */
-const MEDIA_TOKEN = /!\[[^\]]*\]\((\/[^)\s]+)\)|\[file:\s*(\/[^\]\s]+)\]/g;
+/** Reply markup the note above promises: an image embed, or a media directive. */
+const MEDIA_TOKEN = /!\[[^\]]*\]\((\/[^)\s]+)\)|\[(video|voice|file):\s*(\/[^\]\s]+)\]/g;
 
 /** Image bytes → extension, so saved photos open in the bot's viewer tools. */
 function imageExt(bytes: Buffer): string {
@@ -73,8 +78,10 @@ function imageExt(bytes: Buffer): string {
   return ".jpg";
 }
 
-function frameInbound(account: ChannelAccount, fromUserId: string, text: string): string {
-  const body = text.trim() || "[They sent something over WeChat that you can't see (a video or a referral card) — tell them.]";
+function frameInbound(account: ChannelAccount, fromUserId: string, text: string, group: boolean): string {
+  const body = text.trim() || "[They sent something over WeChat that you can't see (a referral card, say) — tell them.]";
+  // In groups everyone gets prefixed — the bot has to know who's talking.
+  if (group) return `[${fromUserId} on WeChat] ${body}`;
   return fromUserId === account.ownerUserId ? body : `[${fromUserId} on WeChat] ${body}`;
 }
 
@@ -89,6 +96,7 @@ export class ChannelManager {
     private readonly relay: Relay,
     private readonly makeClient: (baseUrl?: string) => ILinkClient = (baseUrl) => new ILinkClient(baseUrl),
     private readonly startChatImpl: typeof startChat = startChat,
+    private readonly voice: Pick<typeof VoiceCodec, "toSilk" | "silkToWav"> = { toSilk, silkToWav },
   ) {
     host.onAttach(() => void this.startMonitors().catch((error: unknown) => console.error("paseo-bots: couldn't start the channel monitors", error)));
   }
@@ -159,11 +167,13 @@ export class ChannelManager {
     this.monitors.delete(account.id);
   }
 
-  /** One inbound direct message: media saved to the bot's folder, then the chat. */
+  /** One inbound message: media saved to the bot's folder, then the chat. */
   private async inbound(account: ChannelAccount, client: ILinkClient, msg: InboundMessage): Promise<void> {
-    if (msg.groupId || !allows(account, msg.fromUserId)) return;
+    if (!allows(account, msg.fromUserId)) return;
+    // A conversation is a direct chat, or a group — each maps to one Paseo chat.
+    const conversationId = msg.groupId ?? msg.fromUserId;
     const store = await this.load();
-    const session = store.sessions.find((entry) => entry.accountId === account.id && entry.fromUserId === msg.fromUserId);
+    const session = store.sessions.find((entry) => entry.accountId === account.id && entry.fromUserId === conversationId);
     if (msg.contextToken && session) session.contextToken = msg.contextToken;
     let text = msg.text;
     if (msg.media) {
@@ -171,7 +181,7 @@ export class ChannelManager {
     } else if (msg.unsupported && !msg.text.trim()) {
       text = "";
     }
-    const framed = frameInbound(account, msg.fromUserId, text);
+    const framed = frameInbound(account, msg.fromUserId, text, msg.groupId != null);
     if (session) {
       await this.update(() => {});
       await this.host.requirePaseo().agents.ref(session.chatId).send(framed);
@@ -183,34 +193,45 @@ export class ChannelManager {
       return;
     }
     const chatId = await this.startChatImpl(this.host, this.relay, bot, {
-      prompt: `${CHANNEL_NOTE}\n\n${framed}`,
-      title: `WeChat: ${msg.fromUserId}`,
-      labels: { [CHANNEL_ACCOUNT_LABEL]: account.id, [CHANNEL_FROM_LABEL]: msg.fromUserId },
+      prompt: `${channelNote(msg.groupId != null)}\n\n${framed}`,
+      title: msg.groupId ? `WeChat group: ${msg.groupId}` : `WeChat: ${msg.fromUserId}`,
+      labels: { [CHANNEL_ACCOUNT_LABEL]: account.id, [CHANNEL_FROM_LABEL]: conversationId },
     });
-    await this.update((store) => void store.sessions.push({ accountId: account.id, fromUserId: msg.fromUserId, chatId, contextToken: msg.contextToken }));
+    await this.update((store) => void store.sessions.push({ accountId: account.id, fromUserId: conversationId, chatId, contextToken: msg.contextToken }));
   }
 
   /**
-   * A photo or file from WeChat, decrypted into the bot's folder (`media/`),
-   * where the bot's own tools can open it. Returns the note for the chat.
+   * A photo, video, voice message or file from WeChat, decrypted into the
+   * bot's folder (`media/`), where its own tools can open it. Returns the
+   * note for the chat.
    */
   private async saveMedia(account: ChannelAccount, client: ILinkClient, msg: InboundMessage): Promise<string> {
     const media = msg.media;
     if (!media) return "";
-    const what = media.kind === "image" ? "a photo" : "a file";
+    const what = media.kind === "image" ? "a photo" : media.kind === "video" ? "a video" : media.kind === "voice" ? "a voice message" : "a file";
+    const id = msg.messageId ?? randomUUID();
     try {
-      const bytes = await client.downloadMedia(media);
-      const name = media.kind === "file" ? (media.name ?? `file-${msg.messageId ?? randomUUID()}`) : `photo-${msg.messageId ?? randomUUID()}${imageExt(bytes)}`;
+      const downloaded = await client.downloadMedia(media);
+      const bytes = media.kind === "voice" ? await this.voice.silkToWav(downloaded, media.sampleRate) : downloaded;
+      const name =
+        media.kind === "file"
+          ? (media.name ?? `file-${id}`)
+          : media.kind === "image"
+            ? `photo-${id}${imageExt(bytes)}`
+            : media.kind === "video"
+              ? `video-${id}.mp4`
+              : `voice-${id}.wav`;
+      const safe = name.replace(/[^\w.-]+/g, "_");
       const dir = join(botDataPath(account.botId), "media");
       await mkdir(dir, { recursive: true });
-      await writeFile(join(dir, name.replace(/[^\w.-]+/g, "_")), bytes);
-      return `[They sent ${what} over WeChat — saved to media/${name.replace(/[^\w.-]+/g, "_")} in your folder; open it with your tools to see it.]`;
+      await writeFile(join(dir, safe), bytes);
+      return `[They sent ${what} over WeChat — saved to media/${safe} in your folder; open it with your tools to see it.]`;
     } catch (error) {
       return `[They sent ${what} over WeChat, but saving it failed (${error instanceof Error ? error.message : String(error)}) — tell them to try again.]`;
     }
   }
 
-  /** turnEnded's half: the chat's reply goes back to the WeChat user. */
+  /** turnEnded's half: the chat's reply goes back to the WeChat conversation. */
   async sendReply(accountId: string, fromUserId: string, text: string): Promise<void> {
     const store = await this.load();
     const account = store.accounts.find((entry) => entry.id === accountId);
@@ -220,10 +241,10 @@ export class ChannelManager {
     const session = store.sessions.find((entry) => entry.accountId === accountId && entry.fromUserId === fromUserId);
     const contextToken = session?.contextToken ?? null;
     // Attachments travel as their own messages; the rest is one text reply.
-    const attachments: Array<{ kind: "image" | "file"; path: string }> = [];
+    const attachments: Array<{ kind: MediaKind; path: string }> = [];
     const plain = text
-      .replace(MEDIA_TOKEN, (_token, imagePath: string | undefined, filePath: string | undefined) => {
-        attachments.push({ kind: imagePath ? "image" : "file", path: imagePath ?? filePath ?? "" });
+      .replace(MEDIA_TOKEN, (_token, imagePath: string | undefined, directive: string | undefined, directivePath: string | undefined) => {
+        attachments.push({ kind: imagePath ? "image" : (directive as MediaKind), path: imagePath ?? directivePath ?? "" });
         return "";
       })
       .replace(/\n{3,}/g, "\n\n")
@@ -231,13 +252,36 @@ export class ChannelManager {
     if (plain) await client.sendText(fromUserId, contextToken, plain);
     for (const attachment of attachments) {
       try {
-        const bytes = await readFile(attachment.path);
+        let bytes: Buffer = await readFile(attachment.path);
+        let playtimeMs: number | null = null;
+        if (attachment.kind === "voice") {
+          const encoded = await this.voice.toSilk(attachment.path, bytes);
+          bytes = encoded.silk;
+          playtimeMs = encoded.playtimeMs;
+        }
         const uploaded = await client.uploadMedia(attachment.kind, fromUserId, bytes);
-        await client.sendMedia(fromUserId, contextToken, attachment.kind, basename(attachment.path), uploaded);
+        await client.sendMedia(fromUserId, contextToken, attachment.kind, basename(attachment.path), uploaded, playtimeMs);
       } catch (error) {
         await client.sendText(fromUserId, contextToken, `[I couldn't send ${basename(attachment.path)}: ${error instanceof Error ? error.message : String(error)}]`).catch(() => {});
       }
     }
+    await this.typing(accountId, fromUserId, 2).catch(() => {});
+  }
+
+  /**
+   * The bot's typing indicator in the WeChat conversation: 1 while a turn
+   * runs, 2 once the reply is out. Best-effort — a typing failure must never
+   * touch the message flow.
+   */
+  async typing(accountId: string, conversationId: string, status: 1 | 2): Promise<void> {
+    const store = await this.load();
+    const account = store.accounts.find((entry) => entry.id === accountId);
+    if (!account) return;
+    const client = this.monitors.get(accountId) ?? this.makeClient(account.baseUrl);
+    client.setToken(account.token);
+    const session = store.sessions.find((entry) => entry.accountId === accountId && entry.fromUserId === conversationId);
+    const ticket = await client.getConfig(conversationId, session?.contextToken ?? null);
+    if (ticket) await client.sendTyping(conversationId, ticket, status);
   }
 
   // ------------------------------------------------------------------ logins

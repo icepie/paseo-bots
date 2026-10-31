@@ -45,5 +45,8 @@
     "agents",
     "mcp",
     "composio"
-  ]
+  ],
+  "dependencies": {
+    "silk-wasm": "^3.7.1"
+  }
 }

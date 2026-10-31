@@ -280,7 +280,11 @@ describe("memory journal, daily log and search_chats", () => {
     const host = fakeHost([makeBot({ id: "bot-w", name: "Worker" })]);
     host.chatOf = async () => ({ botId: "bot-w", title: "WeChat: owner-1", routineId: null, labels: { [CHANNEL_ACCOUNT_LABEL]: "acc-1", [CHANNEL_FROM_LABEL]: "owner-1" } });
     const sent: Array<{ accountId: string; fromUserId: string; text: string }> = [];
-    const channels = { sendReply: async (accountId: string, fromUserId: string, text: string) => void sent.push({ accountId, fromUserId, text }) };
+    const typed: Array<{ accountId: string; fromUserId: string; status: number }> = [];
+    const channels = {
+      sendReply: async (accountId: string, fromUserId: string, text: string) => void sent.push({ accountId, fromUserId, text }),
+      typing: async (accountId: string, fromUserId: string, status: number) => void typed.push({ accountId, fromUserId, status }),
+    };
     const scheduler = { finished: async () => {} };
     const journal = new MemoryJournal();
     const agent = { id: newUuid(), workspaceId: null, parentAgentId: null, provider: "claude", cwd: "/", title: null };
@@ -295,5 +299,30 @@ describe("memory journal, daily log and search_chats", () => {
 
     await turnEnded(host, journal, scheduler, { agent, turnId: "t2", outcome: { kind: "failed", error: { message: "boom" } }, timeline: [] as never }, channels);
     expect(sent[1]).toEqual({ accountId: "acc-1", fromUserId: "owner-1", text: "[Something went wrong on my side: boom — try again in a moment.]" });
+
+    // A turn with nothing to say lowers the typing indicator instead.
+    await turnEnded(host, journal, scheduler, { agent, turnId: "t3", outcome: { kind: "completed" }, timeline: [] as never }, channels);
+    expect(sent).toHaveLength(2);
+    expect(typed).toEqual([{ accountId: "acc-1", fromUserId: "owner-1", status: 2 }]);
+  });
+
+  it("raises the typing indicator on WeChat while a channel chat's turn runs", async () => {
+    const { turnStarted } = await import("../server/activity");
+    const { MemoryJournal } = await import("../server/journal");
+    const { CHANNEL_ACCOUNT_LABEL, CHANNEL_FROM_LABEL } = await import("../shared/channels");
+    const host = fakeHost([makeBot({ id: "bot-w", name: "Worker" })]);
+    host.chatOf = async () => ({ botId: "bot-w", title: "WeChat: owner-1", routineId: null, labels: { [CHANNEL_ACCOUNT_LABEL]: "acc-1", [CHANNEL_FROM_LABEL]: "owner-1" } });
+    const typed: Array<{ accountId: string; fromUserId: string; status: number }> = [];
+    const channels = { typing: async (accountId: string, fromUserId: string, status: number) => void typed.push({ accountId, fromUserId, status }) };
+    const journal = new MemoryJournal();
+    const agent = { id: newUuid(), workspaceId: null, parentAgentId: null, provider: "claude", cwd: "/", title: null };
+
+    await turnStarted(host, journal, { agent } as never, channels);
+    expect(typed).toEqual([{ accountId: "acc-1", fromUserId: "owner-1", status: 1 }]);
+
+    // A chat without channel labels never touches the typing indicator.
+    host.chatOf = async () => ({ botId: "bot-w", title: "Local", routineId: null, labels: {} });
+    await turnStarted(host, journal, { agent: { ...agent, id: newUuid() } } as never, channels);
+    expect(typed).toHaveLength(1);
   });
 });
