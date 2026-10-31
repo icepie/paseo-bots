@@ -4,11 +4,12 @@ import { Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { SettingsCard, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Image, Text, View } from "react-native";
+import { ActivityIndicator, Text, View } from "react-native";
 import { channelDisconnectRpc, channelListRpc, channelWechatLoginPollRpc, channelWechatLoginStartRpc } from "../../shared/rpc";
 import { useBotHost } from "../data";
 import { confirmDialog, errorText } from "../native";
 import { ui } from "../typography";
+import { QrCode } from "../ui/QrCode";
 import type { PanelProps } from "./BotPanel";
 import { Button, CardNote, SectionLink, SheetActions, StatusBadge } from "./controls";
 
@@ -144,7 +145,7 @@ function WeChatLoginDialog({ colors, botId, onClose, onConnected }: { colors: Co
     <Modal title="Connect WeChat" open onOpenChange={(next) => !next && onClose()}>
       <Modal.Content contentContainerStyle={{ alignItems: "center", gap: 16 }}>
         <View style={{ width: QR_SIZE, height: QR_SIZE, borderRadius: 8, backgroundColor: "#ffffff", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-          {qrUrl && !startError ? <Image accessibilityLabel="WeChat login QR code" source={{ uri: qrUrl }} resizeMode="contain" style={{ width: QR_SIZE - 16, height: QR_SIZE - 16 }} /> : <ActivityIndicator color={colors.foregroundMuted} />}
+          {qrUrl && !startError ? <QrCode text={qrUrl} size={QR_SIZE - 16} /> : <ActivityIndicator color={colors.foregroundMuted} />}
         </View>
         <Text style={{ fontSize: ui(14), color: failed ? colors.statusDanger : colors.foregroundMuted, textAlign: "center" }}>{statusText}</Text>
         <SheetActions>
