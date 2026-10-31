@@ -75,7 +75,7 @@ Whether a bot may ask others for help is set in its settings under **Permissions
 
 ### Channels
 
-A bot can live on WeChat too: open its settings under **Channels**, press **Connect WeChat** and scan the QR code. Each direct chat with the bot on WeChat then maps to one chat in Paseo — messages in either direction show up on both sides, and the bot's memory and routines work the same. Only the person who scanned the code can reach the bot. Text and voice messages (as their transcription) come through; photos, files and group chats aren't read yet.
+A bot can live on WeChat too: open its settings under **Channels**, press **Connect WeChat** and scan the QR code. Each direct chat with the bot on WeChat then maps to one chat in Paseo — messages in either direction show up on both sides, and the bot's memory and routines work the same. Only the person who scanned the code can reach the bot. Text and voice messages (as their transcription) come through; photos and files land in the bot's `media/` folder where its tools can open them, and the bot can send images and files back (its channel chat explains how). Group chats and videos aren't read yet.
 
 ### Skills & Tools
 

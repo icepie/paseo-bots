@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { foldText } from "../../shared/activity";
 import { CHANNEL_ACCOUNT_LABEL, CHANNEL_FROM_LABEL, ChannelStoreSchema, EMPTY_CHANNEL_STORE, type ChannelAccount, type ChannelStore } from "../../shared/channels";
-import { pluginDataPath } from "../bot-home";
+import { botDataPath, pluginDataPath } from "../bot-home";
 import { startChat } from "../chats";
 import type { BotsHost } from "../host";
 import type { Relay } from "../relay";
@@ -58,9 +58,24 @@ function allows(account: ChannelAccount, fromUserId: string): boolean {
   return !account.ownerUserId && account.allowFrom.length === 0;
 }
 
-function frameInbound(account: ChannelAccount, msg: InboundMessage): string {
-  const text = msg.text.trim() || "[They sent a photo, file or video over WeChat, which you can't see yet — tell them.]";
-  return msg.fromUserId === account.ownerUserId ? text : `[${msg.fromUserId} on WeChat] ${text}`;
+/** First message of a channel chat: what the channel can carry, said once. */
+const CHANNEL_NOTE = "[This chat is connected to WeChat: your replies here are delivered to the person on WeChat. To send them an image, put ![caption](/absolute/path.png) in a reply; for any other file, put [file: /absolute/path].]";
+
+/** Reply markup the note above promises: an image embed, or a file directive. */
+const MEDIA_TOKEN = /!\[[^\]]*\]\((\/[^)\s]+)\)|\[file:\s*(\/[^\]\s]+)\]/g;
+
+/** Image bytes → extension, so saved photos open in the bot's viewer tools. */
+function imageExt(bytes: Buffer): string {
+  if (bytes.length > 12 && bytes.toString("ascii", 8, 12) === "WEBP") return ".webp";
+  if (bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8) return ".jpg";
+  if (bytes.length > 4 && bytes[0] === 0x89 && bytes[1] === 0x50) return ".png";
+  if (bytes.length > 4 && bytes.toString("ascii", 0, 3) === "GIF") return ".gif";
+  return ".jpg";
+}
+
+function frameInbound(account: ChannelAccount, fromUserId: string, text: string): string {
+  const body = text.trim() || "[They sent something over WeChat that you can't see (a video or a referral card) — tell them.]";
+  return fromUserId === account.ownerUserId ? body : `[${fromUserId} on WeChat] ${body}`;
 }
 
 export class ChannelManager {
@@ -144,15 +159,22 @@ export class ChannelManager {
     this.monitors.delete(account.id);
   }
 
-  /** One inbound direct message: mapped to its Paseo chat and sent in. */
+  /** One inbound direct message: media saved to the bot's folder, then the chat. */
   private async inbound(account: ChannelAccount, client: ILinkClient, msg: InboundMessage): Promise<void> {
     if (msg.groupId || !allows(account, msg.fromUserId)) return;
     const store = await this.load();
     const session = store.sessions.find((entry) => entry.accountId === account.id && entry.fromUserId === msg.fromUserId);
     if (msg.contextToken && session) session.contextToken = msg.contextToken;
+    let text = msg.text;
+    if (msg.media) {
+      text = [msg.text.trim(), await this.saveMedia(account, client, msg)].filter(Boolean).join("\n");
+    } else if (msg.unsupported && !msg.text.trim()) {
+      text = "";
+    }
+    const framed = frameInbound(account, msg.fromUserId, text);
     if (session) {
       await this.update(() => {});
-      await this.host.requirePaseo().agents.ref(session.chatId).send(frameInbound(account, msg));
+      await this.host.requirePaseo().agents.ref(session.chatId).send(framed);
       return;
     }
     const bot = await this.host.bot(account.botId);
@@ -161,11 +183,31 @@ export class ChannelManager {
       return;
     }
     const chatId = await this.startChatImpl(this.host, this.relay, bot, {
-      prompt: frameInbound(account, msg),
+      prompt: `${CHANNEL_NOTE}\n\n${framed}`,
       title: `WeChat: ${msg.fromUserId}`,
       labels: { [CHANNEL_ACCOUNT_LABEL]: account.id, [CHANNEL_FROM_LABEL]: msg.fromUserId },
     });
     await this.update((store) => void store.sessions.push({ accountId: account.id, fromUserId: msg.fromUserId, chatId, contextToken: msg.contextToken }));
+  }
+
+  /**
+   * A photo or file from WeChat, decrypted into the bot's folder (`media/`),
+   * where the bot's own tools can open it. Returns the note for the chat.
+   */
+  private async saveMedia(account: ChannelAccount, client: ILinkClient, msg: InboundMessage): Promise<string> {
+    const media = msg.media;
+    if (!media) return "";
+    const what = media.kind === "image" ? "a photo" : "a file";
+    try {
+      const bytes = await client.downloadMedia(media);
+      const name = media.kind === "file" ? (media.name ?? `file-${msg.messageId ?? randomUUID()}`) : `photo-${msg.messageId ?? randomUUID()}${imageExt(bytes)}`;
+      const dir = join(botDataPath(account.botId), "media");
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, name.replace(/[^\w.-]+/g, "_")), bytes);
+      return `[They sent ${what} over WeChat — saved to media/${name.replace(/[^\w.-]+/g, "_")} in your folder; open it with your tools to see it.]`;
+    } catch (error) {
+      return `[They sent ${what} over WeChat, but saving it failed (${error instanceof Error ? error.message : String(error)}) — tell them to try again.]`;
+    }
   }
 
   /** turnEnded's half: the chat's reply goes back to the WeChat user. */
@@ -176,7 +218,26 @@ export class ChannelManager {
     const client = this.monitors.get(accountId) ?? this.makeClient(account.baseUrl);
     client.setToken(account.token);
     const session = store.sessions.find((entry) => entry.accountId === accountId && entry.fromUserId === fromUserId);
-    await client.sendText(fromUserId, session?.contextToken ?? null, text);
+    const contextToken = session?.contextToken ?? null;
+    // Attachments travel as their own messages; the rest is one text reply.
+    const attachments: Array<{ kind: "image" | "file"; path: string }> = [];
+    const plain = text
+      .replace(MEDIA_TOKEN, (_token, imagePath: string | undefined, filePath: string | undefined) => {
+        attachments.push({ kind: imagePath ? "image" : "file", path: imagePath ?? filePath ?? "" });
+        return "";
+      })
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (plain) await client.sendText(fromUserId, contextToken, plain);
+    for (const attachment of attachments) {
+      try {
+        const bytes = await readFile(attachment.path);
+        const uploaded = await client.uploadMedia(attachment.kind, fromUserId, bytes);
+        await client.sendMedia(fromUserId, contextToken, attachment.kind, basename(attachment.path), uploaded);
+      } catch (error) {
+        await client.sendText(fromUserId, contextToken, `[I couldn't send ${basename(attachment.path)}: ${error instanceof Error ? error.message : String(error)}]`).catch(() => {});
+      }
+    }
   }
 
   // ------------------------------------------------------------------ logins

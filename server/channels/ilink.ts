@@ -1,13 +1,17 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 
 /**
  * Minimal client for Tencent's iLink bot API (the WeChat "claw bot"
- * protocol): QR login, long-polled updates and plain text replies.
- * JSON over HTTP; no media yet. Endpoint shapes follow the public protocol
- * (ilink/bot/*), see shared/channels.ts for how accounts are stored.
+ * protocol): QR login, long-polled updates, text and media (image/file).
+ * Media bytes travel through WeChat's CDN, AES-128-ECB encrypted both ways.
+ * Endpoint shapes follow the public protocol (ilink/bot/*), see
+ * shared/channels.ts for how accounts are stored.
  */
 
 export const ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
+
+/** WeChat's CDN: media up- and downloads, separate from the bot API host. */
+export const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 
 /** Errors carrying the server's numeric code (-14 = session expired). */
 export class ILinkError extends Error {
@@ -33,6 +37,19 @@ export interface QRStatus {
   ilinkUserId?: string;
 }
 
+/** Media that arrived with a message; bytes sit encrypted on WeChat's CDN. */
+export interface InboundMedia {
+  kind: "image" | "file";
+  /** Original file name (files only; images get named on save). */
+  name: string | null;
+  /** CDN download reference. */
+  cdnParam: string;
+  /** AES key as hex (images carry it on the item; preferred). */
+  aesKeyHex: string | null;
+  /** AES key as base64 — of raw 16 bytes, or of their hex string. */
+  aesKeyBase64: string | null;
+}
+
 export interface InboundMessage {
   messageId: number | null;
   fromUserId: string;
@@ -41,8 +58,21 @@ export interface InboundMessage {
   text: string;
   /** Echoed verbatim when replying to this user. */
   contextToken: string | null;
-  /** Message types we don't read yet (image/file/video) arrived. */
+  media: InboundMedia | null;
+  /** Message types we don't read yet (video, referrals) arrived. */
   unsupported: boolean;
+}
+
+/** An uploaded file's coordinates, ready for a sendmessage media item. */
+export interface UploadedMedia {
+  /** CDN download reference (CDNMedia.encrypt_query_param). */
+  downloadParam: string;
+  /** AES key, base64 of its hex string — the shape CDNMedia.aes_key expects. */
+  aesKeyBase64: string;
+  /** Plaintext size. */
+  rawSize: number;
+  /** Ciphertext size (AES-128-ECB + PKCS7). */
+  cipherSize: number;
 }
 
 export interface Updates {
@@ -67,6 +97,19 @@ function timeoutSignal(ms: number): AbortSignal {
 /** X-WECHAT-UIN: random uint32 as decimal string, base64-encoded. */
 function wechatUin(): string {
   return Buffer.from(String(randomBytes(4).readUInt32BE(0)), "utf-8").toString("base64");
+}
+
+/**
+ * The media's AES-128 key. Images carry it hex-encoded on the item; the CDN
+ * reference carries it base64-encoded — of the raw 16 bytes, or of their hex
+ * string (files), which decodes to 32 ASCII hex chars.
+ */
+function aesKeyOf(media: InboundMedia): Buffer {
+  if (media.aesKeyHex) return Buffer.from(media.aesKeyHex, "hex");
+  const decoded = Buffer.from(media.aesKeyBase64 ?? "", "base64");
+  if (decoded.length === 16) return decoded;
+  if (decoded.length === 32 && /^[0-9a-fA-F]{32}$/.test(decoded.toString("ascii"))) return Buffer.from(decoded.toString("ascii"), "hex");
+  throw new ILinkError(`CDN media aes_key must be 16 raw bytes or 32 hex chars, got ${decoded.length} bytes`, null);
 }
 
 type FetchLike = typeof fetch;
@@ -132,7 +175,13 @@ export class ILinkClient {
         group_id?: string;
         message_type?: number;
         context_token?: string;
-        item_list?: Array<{ type?: number; text_item?: { text?: string }; voice_item?: { text?: string } }>;
+        item_list?: Array<{
+          type?: number;
+          text_item?: { text?: string };
+          voice_item?: { text?: string };
+          image_item?: { media?: { encrypt_query_param?: string; aes_key?: string }; aeskey?: string };
+          file_item?: { media?: { encrypt_query_param?: string; aes_key?: string }; file_name?: string };
+        }>;
       }>;
       get_updates_buf?: string;
       longpolling_timeout_ms?: number;
@@ -142,11 +191,21 @@ export class ILinkClient {
       // 1 = from a user; 2 = our own bot's (skip, and skip anything without a sender).
       if (msg.message_type !== 1 || !msg.from_user_id) continue;
       let text = "";
+      let media: InboundMedia | null = null;
       let unsupported = false;
       for (const item of msg.item_list ?? []) {
         if (item.type === 1 && item.text_item?.text != null) text = item.text_item.text;
         else if (item.type === 3 && item.voice_item?.text) text = item.voice_item.text;
-        else if (item.type === 2 || item.type === 4 || item.type === 5) unsupported = true;
+        else if (item.type === 2 && item.image_item?.media?.encrypt_query_param) {
+          media = { kind: "image", name: null, cdnParam: item.image_item.media.encrypt_query_param, aesKeyHex: item.image_item.aeskey ?? null, aesKeyBase64: item.image_item.media.aes_key ?? null };
+        } else if (item.type === 4 && item.file_item?.media?.encrypt_query_param) {
+          media = { kind: "file", name: item.file_item.file_name ?? null, cdnParam: item.file_item.media.encrypt_query_param, aesKeyHex: null, aesKeyBase64: item.file_item.media.aes_key ?? null };
+        } else if (item.type === 2 || item.type === 4 || item.type === 5) unsupported = true;
+      }
+      // Media without its key can never be decrypted — treat it as unreadable.
+      if (media && !media.aesKeyHex && !media.aesKeyBase64) {
+        media = null;
+        unsupported = true;
       }
       messages.push({
         messageId: msg.message_id ?? null,
@@ -154,10 +213,77 @@ export class ILinkClient {
         groupId: msg.group_id ?? null,
         text,
         contextToken: msg.context_token ?? null,
+        media,
         unsupported,
       });
     }
     return { messages, syncBuf: data.get_updates_buf ?? syncBuf, nextTimeoutMs: data.longpolling_timeout_ms ?? null };
+  }
+
+  /** Upload step 1: trade the file's coordinates for a CDN upload slot. */
+  private async getUploadUrl(toUserId: string, kind: InboundMedia["kind"], filekey: string, rawSize: number, rawMd5: string, cipherSize: number, aesKeyHex: string): Promise<string> {
+    const data = await this.post<{ upload_param?: string }>("ilink/bot/getuploadurl", {
+      filekey,
+      media_type: kind === "image" ? 1 : 3,
+      to_user_id: toUserId,
+      rawsize: rawSize,
+      rawfilemd5: rawMd5,
+      filesize: cipherSize,
+      no_need_thumb: true,
+      aeskey: aesKeyHex,
+      base_info: { channel_version: "paseo-bots" },
+    }, API_TIMEOUT_MS);
+    if (!data.upload_param) throw new ILinkError("iLink getuploadurl returned no upload_param", null);
+    return data.upload_param;
+  }
+
+  /** Upload a file's bytes (encrypted) to the CDN; the result goes into sendMedia. */
+  async uploadMedia(kind: InboundMedia["kind"], toUserId: string, plaintext: Buffer): Promise<UploadedMedia> {
+    const rawSize = plaintext.length;
+    const rawMd5 = createHash("md5").update(plaintext).digest("hex");
+    const cipherSize = Math.ceil((rawSize + 1) / 16) * 16;
+    const filekey = randomBytes(16).toString("hex");
+    const aesKey = randomBytes(16);
+    const uploadParam = await this.getUploadUrl(toUserId, kind, filekey, rawSize, rawMd5, cipherSize, aesKey.toString("hex"));
+    const cipher = createCipheriv("aes-128-ecb", aesKey, null);
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const response = await this.fetchImpl(`${CDN_BASE_URL}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: new Uint8Array(ciphertext),
+      signal: timeoutSignal(API_TIMEOUT_MS * 4),
+    });
+    if (!response.ok) throw new ILinkError(`CDN upload: HTTP ${response.status}`, null);
+    const downloadParam = response.headers.get("x-encrypted-param");
+    if (!downloadParam) throw new ILinkError("CDN upload: no x-encrypted-param in the response", null);
+    // CDNMedia.aes_key wants base64 of the key's hex string (not of the raw key).
+    return { downloadParam, aesKeyBase64: Buffer.from(aesKey.toString("hex"), "utf-8").toString("base64"), rawSize, cipherSize };
+  }
+
+  /** Download and decrypt media that arrived with a message. */
+  async downloadMedia(media: InboundMedia): Promise<Buffer> {
+    const response = await this.fetchImpl(`${CDN_BASE_URL}/download?encrypted_query_param=${encodeURIComponent(media.cdnParam)}`, { signal: timeoutSignal(API_TIMEOUT_MS * 4) });
+    if (!response.ok) throw new ILinkError(`CDN download: HTTP ${response.status}`, null);
+    const ciphertext = Buffer.from(await response.arrayBuffer());
+    const decipher = createDecipheriv("aes-128-ecb", aesKeyOf(media), null);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  }
+
+  /** A media message: one image or file item, context token echoed. */
+  async sendMedia(toUserId: string, contextToken: string | null, kind: InboundMedia["kind"], name: string, uploaded: UploadedMedia): Promise<void> {
+    const media = { encrypt_query_param: uploaded.downloadParam, aes_key: uploaded.aesKeyBase64, encrypt_type: 1 };
+    await this.post("ilink/bot/sendmessage", {
+      msg: {
+        from_user_id: "",
+        to_user_id: toUserId,
+        client_id: randomUUID(),
+        message_type: 2,
+        message_state: 2,
+        context_token: contextToken ?? undefined,
+        item_list: [kind === "image" ? { type: 2, image_item: { media, mid_size: uploaded.cipherSize } } : { type: 4, file_item: { media, file_name: name, len: String(uploaded.rawSize) } }],
+      },
+      base_info: { channel_version: "paseo-bots" },
+    }, API_TIMEOUT_MS);
   }
 
   /** Plain-text reply to one user, chunked to WeChat's message size. */
