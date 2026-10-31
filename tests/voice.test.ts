@@ -1,6 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import { silkToWav, toSilk, VOICE_SAMPLE_RATE } from "../server/channels/voice";
+
+// voice.ts extracts silk-wasm under $PASEO_HOME/plugin-data on first use.
+beforeAll(() => {
+  process.env.PASEO_HOME = mkdtempSync(join(tmpdir(), "paseo-voice-test-"));
+});
 
 /** A short mono s16le WAV of a sine wave. */
 function sineWav(sampleRate: number, samples: number): Buffer {

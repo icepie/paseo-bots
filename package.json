@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "vendor:silk": "node scripts/vendor-silk.mjs",
     "test": "vitest run"
   },
   "devDependencies": {
