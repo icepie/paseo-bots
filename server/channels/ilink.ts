@@ -220,9 +220,9 @@ export class ILinkClient {
     return { messages, syncBuf: data.get_updates_buf ?? syncBuf, nextTimeoutMs: data.longpolling_timeout_ms ?? null };
   }
 
-  /** Upload step 1: trade the file's coordinates for a CDN upload slot. */
+  /** Upload step 1: trade the file's coordinates for a CDN upload URL. */
   private async getUploadUrl(toUserId: string, kind: InboundMedia["kind"], filekey: string, rawSize: number, rawMd5: string, cipherSize: number, aesKeyHex: string): Promise<string> {
-    const data = await this.post<{ upload_param?: string }>("ilink/bot/getuploadurl", {
+    const data = await this.post<{ upload_param?: string; upload_full_url?: string }>("ilink/bot/getuploadurl", {
       filekey,
       media_type: kind === "image" ? 1 : 3,
       to_user_id: toUserId,
@@ -233,8 +233,10 @@ export class ILinkClient {
       aeskey: aesKeyHex,
       base_info: { channel_version: "paseo-bots" },
     }, API_TIMEOUT_MS);
-    if (!data.upload_param) throw new ILinkError("iLink getuploadurl returned no upload_param", null);
-    return data.upload_param;
+    // Servers answer either the ready-made URL or the param to build it from.
+    if (data.upload_full_url) return data.upload_full_url;
+    if (data.upload_param) return `${CDN_BASE_URL}/upload?encrypted_query_param=${encodeURIComponent(data.upload_param)}&filekey=${encodeURIComponent(filekey)}`;
+    throw new ILinkError(`iLink getuploadurl gave no upload URL: ${JSON.stringify(data).slice(0, 200)}`, null);
   }
 
   /** Upload a file's bytes (encrypted) to the CDN; the result goes into sendMedia. */
@@ -244,10 +246,10 @@ export class ILinkClient {
     const cipherSize = Math.ceil((rawSize + 1) / 16) * 16;
     const filekey = randomBytes(16).toString("hex");
     const aesKey = randomBytes(16);
-    const uploadParam = await this.getUploadUrl(toUserId, kind, filekey, rawSize, rawMd5, cipherSize, aesKey.toString("hex"));
+    const uploadUrl = await this.getUploadUrl(toUserId, kind, filekey, rawSize, rawMd5, cipherSize, aesKey.toString("hex"));
     const cipher = createCipheriv("aes-128-ecb", aesKey, null);
     const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    const response = await this.fetchImpl(`${CDN_BASE_URL}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`, {
+    const response = await this.fetchImpl(uploadUrl, {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
       body: new Uint8Array(ciphertext),

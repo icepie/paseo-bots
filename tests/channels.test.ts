@@ -86,8 +86,14 @@ describe("iLink client", () => {
     const { createDecipheriv } = await import("node:crypto");
     const plain = Buffer.from("photo bytes".repeat(100));
     const calls: Array<{ url: string; body: Buffer; downloadParam: string | null }> = [];
+    let fullUrlNext = false;
     const client = new ILinkClient("https://ilink.test", "tok", (async (url: string, init: { body: string | Buffer; headers?: Record<string, string> }) => {
-      if (url.includes("getuploadurl")) return new Response(JSON.stringify({ ret: 0, upload_param: "up-param" }));
+      if (url.includes("getuploadurl")) {
+        // Live servers answer upload_full_url; the reference protocol names upload_param.
+        const body = fullUrlNext ? { ret: 0, upload_full_url: "https://cdn.test/upload?full=1" } : { ret: 0, upload_param: "up-param" };
+        fullUrlNext = !fullUrlNext;
+        return new Response(JSON.stringify(body));
+      }
       if (url.includes("/upload?")) {
         calls.push({ url, body: Buffer.from(init.body as Buffer), downloadParam: null });
         return new Response("", { headers: { "x-encrypted-param": "dl-param" } });
@@ -101,6 +107,9 @@ describe("iLink client", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toContain("encrypted_query_param=up-param");
     expect(calls[0].url).toContain("filekey=");
+    // upload_full_url is posted to verbatim.
+    await client.uploadMedia("file", "u1", plain);
+    expect(calls[1].url).toBe("https://cdn.test/upload?full=1");
     const decipher = createDecipheriv("aes-128-ecb", Buffer.from(Buffer.from(uploaded.aesKeyBase64, "base64").toString("utf-8"), "hex"), null);
     expect(Buffer.concat([decipher.update(calls[0].body), decipher.final()])).toEqual(plain);
 
