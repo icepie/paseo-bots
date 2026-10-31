@@ -56,6 +56,14 @@ describe("iLink client", () => {
     expect(bodies.every((call) => call.msg.to_user_id === "u1" && call.msg.context_token === "ctx-9")).toBe(true);
   });
 
+  it("maps the confirmed login's snake_case fields", async () => {
+    const { ILinkClient } = await import("../server/channels/ilink");
+    const client = new ILinkClient("https://ilink.test", null, (async () => new Response(
+      JSON.stringify({ ret: 0, status: "confirmed", bot_token: "tok", ilink_bot_id: "wx@im.bot", baseurl: "https://ilink.test", ilink_user_id: "owner-1" }),
+    )) as never);
+    expect(await client.pollQRCodeStatus("q1")).toEqual({ status: "confirmed", botToken: "tok", ilinkBotId: "wx@im.bot", baseUrl: "https://ilink.test", ilinkUserId: "owner-1" });
+  });
+
   it("fails on the server's error codes so the monitor can react", async () => {
     const { ILinkClient, ILinkError } = await import("../server/channels/ilink");
     const client = new ILinkClient("https://ilink.test", null, (async () => new Response(JSON.stringify({ ret: -14, errcode: -14, errmsg: "session timeout" }))) as never);

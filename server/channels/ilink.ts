@@ -105,7 +105,9 @@ export class ILinkClient {
   private async get<T>(path: string, timeoutMs: number): Promise<T> {
     const response = await this.fetchImpl(`${this.baseUrl}/${path}`, { signal: timeoutSignal(timeoutMs) });
     if (!response.ok) throw new ILinkError(`iLink ${path}: HTTP ${response.status}`, null);
-    return (await response.json()) as T;
+    const data = (await response.json()) as { ret?: number; errcode?: number; errmsg?: string } & T;
+    if (data.ret && data.ret !== 0) throw new ILinkError(`iLink ${path}: ${data.errmsg ?? `ret ${data.ret}`}`, data.errcode ?? data.ret);
+    return data;
   }
 
   /** Step 1 of login: the QR code to show. Unauthenticated. */
@@ -116,7 +118,9 @@ export class ILinkClient {
 
   /** Step 2 of login: long-poll the scan state until "confirmed"/"expired". */
   async pollQRCodeStatus(qrcode: string): Promise<QRStatus> {
-    return this.get<QRStatus>(`ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`, LONG_POLL_FALLBACK_MS + 5_000);
+    const data = await this.get<{ status: QRStatus["status"]; bot_token?: string; ilink_bot_id?: string; baseurl?: string; ilink_user_id?: string }>(`ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`, LONG_POLL_FALLBACK_MS + 5_000);
+    // The wire format is snake_case; QRStatus is the plugin's camelCase shape.
+    return { status: data.status, botToken: data.bot_token, ilinkBotId: data.ilink_bot_id, baseUrl: data.baseurl, ilinkUserId: data.ilink_user_id };
   }
 
   /** Long-poll for new direct messages. `syncBuf` is "" on first connect. */
